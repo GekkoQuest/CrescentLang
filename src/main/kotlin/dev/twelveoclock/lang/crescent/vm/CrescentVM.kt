@@ -8,6 +8,8 @@ import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node.Type
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken
 import dev.twelveoclock.lang.crescent.project.checkEquals
 import java.util.*
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
 import kotlin.math.round
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -19,11 +21,22 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 	// Object name -> Object
 	val objects = mutableMapOf<String, Instance.Object>()
+	private val coroutineExecutor = Executors.newVirtualThreadPerTaskExecutor()
+
+	init {
+		require(mainFile in files) { "The main file must be part of the VM file set" }
+		validateTraits()
+	}
 
 
 	fun invoke(args: List<String> = emptyList()) {
+		invokeAsync(args).join()
+	}
 
-		val mainFunction = mainFile.mainFunction!!
+	fun invokeAsync(args: List<String> = emptyList()): CompletableFuture<Node> = CompletableFuture.supplyAsync({
+
+		val mainFunction = mainFile.mainFunction
+			?: throw CrescentRuntimeException(mainFile.path, "No main function was declared")
 
 		val functionArgs = if (mainFunction.params.isEmpty()) {
 			emptyList()
@@ -37,12 +50,14 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 			functionArgs,
 			BlockContext(mainFile, mainFile, mutableMapOf(), mutableMapOf())
 		)
-	}
+	}, coroutineExecutor)
 
 	fun runFunction(function: Node.Function, args: List<Node>, context: BlockContext): Node {
 
-		// TODO: Account for default params
-		checkEquals(function.params.size, args.size)
+		val requiredParameters = function.params.count { it is Node.Parameter.Basic }
+		check(args.size in requiredParameters..function.params.size) {
+			"Function ${function.name} expects $requiredParameters..${function.params.size} arguments, got ${args.size}"
+		}
 
 		// Need to manually copy since .copy uses the same map instance, .toMutableMap() clones properly
 		val functionContext = BlockContext(
@@ -54,13 +69,16 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 		function.params.forEachIndexed { index, parameter ->
 
-			val arg = args[index]
+			val arg = args.getOrNull(index) ?: when (parameter) {
+				is Node.Parameter.WithDefault -> runNode(parameter.defaultValue, functionContext)
+				is Node.Parameter.Basic -> error("Missing required argument '${parameter.name}'")
+			}
 
 			checkIsSameType(parameter, arg) { parameterType ->
 				"Parameter type doesn't match argument: $parameterType != ${findType(args[index])}"
 			}
 
-			functionContext.parameters[parameter.name] = Variable(parameter.name, Instance.Node(findType(arg), arg), true)
+			functionContext.parameters[parameter.name] = Variable(parameter.name, instanceOf(arg), true)
 		}
 
 		return when (val result = runBlock(function.innerCode, functionContext)) {
@@ -76,7 +94,7 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 			val result = runNode(node, context)
 
-			if (index + 1 == block.nodes.size || result is Node.Return) {
+			if (index + 1 == block.nodes.size || result is Node.Return || result == CrescentToken.Keyword.BREAK || result == CrescentToken.Keyword.CONTINUE) {
 				return result
 			}
 		}
@@ -92,23 +110,32 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 			is Primitive.Char,
 			is Primitive.Boolean,
 			is Node.Array,
+			is Instance,
 			-> {
 				return node
 			}
 
 			is Node.Identifier -> {
 
-				val holderVariable = when (val holder = context.holder) {
+				val holderVariable: Node? = when (val holder = context.holder) {
+					is Instance.Struct -> holder.variables[node.name]?.instance?.asNode()
+					is Instance.Object -> holder.constants[node.name]?.instance?.asNode()
+						?: holder.variables[node.name]?.instance?.asNode()
+					is Instance.Enum -> holder.properties[node.name]?.instance?.asNode()
+					is Type.Basic -> findEnum(holder.name)?.let { instantiateEnum(it, node.name, context) }
 					is Node.Object -> holder.constants[node.name]?.value ?: holder.variables[node.name]?.value
 					is Node.File -> holder.constants[node.name]?.value ?: holder.variables[node.name]?.value
-					else -> files.firstNotNullOfOrNull { it.constants[node.name]?.value }
+					else -> null
 				}
 
 				return holderVariable
-					?: (context.parameters[node.name]?.instance as? Instance.Node)?.value
-					?: (context.variables[node.name]?.instance as? Instance.Node)?.value
+					?: context.parameters[node.name]?.instance?.asNode()
+					?: context.variables[node.name]?.instance?.asNode()
 					?: context.file.constants[node.name]?.value
-					?: context.file.objects[node.name]?.let { runObject(it, context) }
+					?: files.firstNotNullOfOrNull { it.constants[node.name]?.value }
+					?: findObject(node.name)?.let { runObject(it, context) }
+					?: findEnum(node.name)?.let { Type.Basic(it.name) }
+					?: findStruct(node.name)?.let { Type.Basic(it.name) }
 					?: node
 			}
 
@@ -141,7 +168,7 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 						return@forEach
 					}
 
-					lastNode = runNode(it, context.copy(holder = lastNode!!))
+					lastNode = runNode(it, context.copy(holder = checkNotNull(lastNode)))
 				}
 
 				return lastNode!!
@@ -168,8 +195,26 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 			is Node.Statement.While -> {
 				while ((runNode(node.predicate, context) as Primitive.Boolean).data) {
-					runBlock(node.block, context)
+					when (val result = runBlock(node.block, context)) {
+						is Node.Return -> return result
+						CrescentToken.Keyword.BREAK -> break
+						CrescentToken.Keyword.CONTINUE -> continue
+						else -> Unit
+					}
 				}
+			}
+
+			is Node.Statement.When -> {
+				val argument = runNode(node.argument, context)
+				for (clause in node.predicateToBlock) {
+					val matches = when (val predicate = clause.ifExpressionNode) {
+						null -> true
+						is Node.Statement.When.EnumShortHand -> argument is Instance.Enum && argument.entryName == predicate.name
+						else -> valuesEqual(argument, runNode(predicate, context))
+					}
+					if (matches) return runBlock(clause.thenBlock, context)
+				}
+				return Type.unit
 			}
 
 			is Node.Statement.For -> {
@@ -278,7 +323,7 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 			is Node.Variable.Basic,
 			is Node.Variable.Local -> {
-				val variable = runVariable(node as Node.Variable, context)
+				val variable = runVariable(node, context)
 				context.variables[variable.name] = variable
 			}
 
@@ -290,34 +335,13 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 	fun runVariable(node: Node.Variable, context: BlockContext): Variable {
 
-		var type = node.type
-
 		val value = when (node) {
 
-			is Node.Variable.Basic -> {
+			is Node.Variable.Basic -> runNode(node.value, context)
 
-				if (node.type is Type.Implicit) {
-					type = findType(node.value)
-				}
-
-				runNode(node.value, context)
-			}
-
-			is Node.Variable.Local -> {
-
-				if (node.type is Type.Implicit) {
-					type = findType(node.value)
-				}
-
-				runNode(node.value, context)
-			}
+			is Node.Variable.Local -> runNode(node.value, context)
 
 			is Node.Variable.Constant -> {
-
-				if (node.type is Type.Implicit) {
-					type = findType(node.value)
-				}
-
 				if (context.holder is Node.File || context.holder is Node.Object) {
 					runNode(node.value, context)
 				}
@@ -328,23 +352,26 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 			else -> error("Not a recognized variable node: $node")
 		}
+		val type = if (node.type is Type.Implicit) findType(value) else node.type
 
-		return Variable(node.name, Instance.Node(type, value), node.isFinal)
+		return Variable(node.name, if (value is Instance) value else Instance.Node(type, value), node.isFinal)
 	}
 
-	fun runObject(objectNode: Node.Object, context: BlockContext): Node.Object {
+	fun runObject(objectNode: Node.Object, context: BlockContext): Instance.Object {
+		objects[objectNode.name]?.let { return it }
 
 		val objectContext = context.copy(holder = objectNode, variables = mutableMapOf())
 
-		objects[objectNode.name] = Instance.Object(
+		val instance = Instance.Object(
 			objectNode.name,
 			objectNode.type,
 			objectNode.constants.mapValues { runVariable(it.value, objectContext) },
 			objectNode.variables.mapValues { runVariable(it.value, objectContext) },
 			objectNode.functions,
 		)
+		objects[objectNode.name] = instance
 
-		return objectNode
+		return instance
 	}
 
 	// TODO: Take in a stack or something
@@ -361,7 +388,10 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 				is CrescentToken.Operator -> {
 					when (node) {
 
-						CrescentToken.Operator.NOT -> TODO()
+						CrescentToken.Operator.NOT -> {
+							val value = runNode(stack.pop(), context) as Primitive.Boolean
+							stack.push(Primitive.Boolean(!value.data))
+						}
 
 						// TODO: Override operators for these in Primitive.Number
 						CrescentToken.Operator.ADD -> {
@@ -430,37 +460,34 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 									((context.variables.getValue(pop2.identifier).instance as Instance.Node).value as Node.Array).values[index] = value
 								}
 
-								is Node.Identifier -> {
-
-									val variable = checkNotNull(context.variables[pop2.name]) {
-										"Variable ${pop2.name} not found for reassignment."
-									}
-
-									val valueType = findType(value)
-
-									checkIsSameType(variable.instance.type, valueType) {
-										"Variable ${variable.name}: ${variable.instance.type} cannot be assigned to a value of type $valueType"
-									}
-
-									check(!variable.isFinal) {
-										"Variable ${variable.name} is not mutable"
-									}
-
-									variable.instance = Instance.Node(valueType, value)
-								}
+								is Node.Identifier -> assignValue(pop2, value, context)
 							}
 
 							return Type.unit
 						}
 
-						CrescentToken.Operator.ADD_ASSIGN -> {
-
+						CrescentToken.Operator.ADD_ASSIGN,
+						CrescentToken.Operator.SUB_ASSIGN,
+						CrescentToken.Operator.MUL_ASSIGN,
+						CrescentToken.Operator.DIV_ASSIGN,
+						CrescentToken.Operator.REM_ASSIGN,
+						CrescentToken.Operator.POW_ASSIGN -> {
+							val right = runNode(stack.pop(), context)
+							val target = stack.pop() as Node.Identifier
+							val left = runNode(target, context)
+							val value = when (node) {
+								CrescentToken.Operator.ADD_ASSIGN -> if (left is Primitive.String || right is Primitive.String) {
+									Primitive.String(left.asString() + right.asString())
+								} else (left as Primitive.Number) + (right as Primitive.Number)
+								CrescentToken.Operator.SUB_ASSIGN -> (left as Primitive.Number) - (right as Primitive.Number)
+								CrescentToken.Operator.MUL_ASSIGN -> (left as Primitive.Number).multiply(right as Primitive.Number)
+								CrescentToken.Operator.DIV_ASSIGN -> (left as Primitive.Number) / (right as Primitive.Number)
+								CrescentToken.Operator.REM_ASSIGN -> (left as Primitive.Number) % (right as Primitive.Number)
+								CrescentToken.Operator.POW_ASSIGN -> (left as Primitive.Number).pow(right as Primitive.Number)
+							}
+							assignValue(target, value, context)
+							return Type.unit
 						}
-						CrescentToken.Operator.SUB_ASSIGN -> TODO()
-						CrescentToken.Operator.MUL_ASSIGN -> TODO()
-						CrescentToken.Operator.DIV_ASSIGN -> TODO()
-						CrescentToken.Operator.REM_ASSIGN -> TODO()
-						CrescentToken.Operator.POW_ASSIGN -> TODO()
 
 						CrescentToken.Operator.OR_COMPARE -> {
 
@@ -520,7 +547,11 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 							stack.push(Primitive.Boolean(pop2 > pop1))
 						}
 
-						CrescentToken.Operator.EQUALS_REFERENCE_COMPARE -> TODO()
+						CrescentToken.Operator.EQUALS_REFERENCE_COMPARE -> {
+							val pop1 = runNode(stack.pop(), context)
+							val pop2 = runNode(stack.pop(), context)
+							stack.push(Primitive.Boolean(pop2 === pop1))
+						}
 
 						CrescentToken.Operator.NOT_EQUALS_COMPARE -> {
 
@@ -535,25 +566,47 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 							}
 						}
 
-						CrescentToken.Operator.NOT_EQUALS_REFERENCE_COMPARE -> TODO()
-						CrescentToken.Operator.CONTAINS -> TODO()
-						CrescentToken.Operator.RANGE_TO -> TODO()
-						CrescentToken.Operator.TYPE_PREFIX -> TODO()
+						CrescentToken.Operator.NOT_EQUALS_REFERENCE_COMPARE -> {
+							val pop1 = runNode(stack.pop(), context)
+							val pop2 = runNode(stack.pop(), context)
+							stack.push(Primitive.Boolean(pop2 !== pop1))
+						}
+						CrescentToken.Operator.CONTAINS,
+						CrescentToken.Operator.NOT_CONTAINS -> {
+							val needle = runNode(stack.pop(), context)
+							val haystack = runNode(stack.pop(), context)
+							val contains = when (haystack) {
+								is Primitive.String -> haystack.data.contains(needle.asString())
+								is Node.Array -> haystack.values.any { valuesEqual(it, needle) }
+								else -> false
+							}
+							stack.push(Primitive.Boolean(if (node == CrescentToken.Operator.CONTAINS) contains else !contains))
+						}
+						CrescentToken.Operator.RANGE_TO -> {
+							val end = (runNode(stack.pop(), context) as Primitive.Number).toI32().data
+							val start = (runNode(stack.pop(), context) as Primitive.Number).toI32().data
+							stack.push(Node.Array((start..end).map { Primitive.Number.I32(it) }.toTypedArray()))
+						}
+						CrescentToken.Operator.TYPE_PREFIX -> error("Type declarations are not runtime expressions")
 						CrescentToken.Operator.RETURN -> {
 							return stack.poll() ?: Type.unit
 						}
-						CrescentToken.Operator.RESULT -> TODO()
-						CrescentToken.Operator.COMMA -> TODO()
-						CrescentToken.Operator.DOT -> TODO()
-						CrescentToken.Operator.AS -> TODO()
-						CrescentToken.Operator.IMPORT_SEPARATOR -> TODO()
+						CrescentToken.Operator.RESULT -> stack.push(runNode(stack.pop(), context))
+						CrescentToken.Operator.COMMA -> error("Comma is only valid between arguments")
+						CrescentToken.Operator.DOT -> error("Dot access must be represented as a dot chain")
+						CrescentToken.Operator.AS -> Unit
+						CrescentToken.Operator.IMPORT_SEPARATOR -> error("Import separators are not runtime expressions")
 
 						CrescentToken.Operator.INSTANCE_OF -> {
 
-							val pop1 = (runNode(stack.pop(), context) as Node.Identifier)
+							val target = stack.pop()
 							val pop2 = runNode(stack.pop(), context)
-
-							stack.push(Primitive.Boolean(pop1.name == Type.any.name || "${findType(pop2)}" == pop1.name))
+							val targetType = when (target) {
+								is Node.Identifier -> Type.Basic(target.name)
+								is Type.Basic -> target
+								else -> error("Expected a type after 'is', got $target")
+							}
+							stack.push(Primitive.Boolean(isAssignable(targetType, pop2)))
 						}
 
 						CrescentToken.Operator.BIT_SHIFT_RIGHT -> {
@@ -603,8 +656,12 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 							stack.push(Primitive.Number.I32(pop2 xor pop1))
 						}
 
-						CrescentToken.Operator.NOT_INSTANCE_OF -> TODO()
-						CrescentToken.Operator.NOT_CONTAINS -> TODO()
+						CrescentToken.Operator.NOT_INSTANCE_OF -> {
+							val target = stack.pop()
+							val pop2 = runNode(stack.pop(), context)
+							val targetType = Type.Basic((target as Node.Identifier).name)
+							stack.push(Primitive.Boolean(!isAssignable(targetType, pop2)))
+						}
 					}
 				}
 
@@ -617,6 +674,9 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 				is Node.GetCall,
 				is Node.Statement.If,
 				is Node.IdentifierCall,
+				is Node.DotChain,
+				is Instance,
+				is Type,
 				-> {
 					stack.push(node)
 				}
@@ -671,13 +731,32 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 			"readLine" -> {
 				checkEquals(1, node.arguments.size)
 				println(runNode(node.arguments[0], context).asString())
-				return Primitive.String(readLine()!!)
+				return Primitive.String(readln())
 			}
 
 			"readBoolean" -> {
 				checkEquals(1, node.arguments.size)
 				println(runNode(node.arguments[0], context).asString())
-				return Primitive.Boolean(readLine()!!.toBooleanStrict())
+				return Primitive.Boolean(readln().toBooleanStrict())
+			}
+
+			"readDouble" -> {
+				checkEquals(1, node.arguments.size)
+				println(runNode(node.arguments[0], context).asString())
+				return Primitive.Number.F64(readln().toDouble())
+			}
+
+			"readInt" -> {
+				checkEquals(1, node.arguments.size)
+				println(runNode(node.arguments[0], context).asString())
+				return Primitive.Number.I32(readln().toInt())
+			}
+
+			"await" -> {
+				checkEquals(1, node.arguments.size)
+				val future = runNode(node.arguments.single(), context) as? Instance.Future
+					?: error("await expects an async function result")
+				return future.value.join()
 			}
 
 			// TODO: Make this return a special type struct instance
@@ -687,12 +766,24 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 			}
 
 			else -> {
-
-				val struct = mainFile.structs[node.identifier]
 				val argumentValues = node.arguments.map { runNode(it, context) }
+				val holderType = (context.holder as? Type.Basic)?.name
+				val enum = holderType?.let(::findEnum)
+
+				if (enum != null) {
+					return when (node.identifier) {
+						"random" -> instantiateEnum(enum, enum.structs.random().name, context)
+						"values" -> Node.Array(enum.structs.map { instantiateEnum(enum, it.name, context) }.toTypedArray())
+						else -> instantiateEnum(enum, node.identifier, context, argumentValues)
+					}
+				}
+
+				val struct = if (context.holder is Type.Basic) null else findStruct(node.identifier)
 
 				if (struct != null) {
-
+					check(struct.variables.size == argumentValues.size) {
+						"Struct ${struct.name} expects ${struct.variables.size} arguments, got ${argumentValues.size}"
+					}
 					val parameters = mutableMapOf<String, Variable>()
 
 					struct.variables.forEachIndexed { index, variable ->
@@ -703,36 +794,19 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 							"Variable ${variable.name} had an argument of type ${findType(argumentValues[index])}, expected ${variable.type}"
 						}
 
-						parameters[variable.name] = Variable(variable.name, Instance.Node(findType(argument), argument), variable.isFinal)
+						parameters[variable.name] = Variable(variable.name, instanceOf(argument), variable.isFinal)
 					}
 
-					// TODO: Instance sealed class and store it
-					Instance.Struct(struct.name, parameters)
+					return Instance.Struct(struct.name, parameters)
 				}
-				else {
 
-					val function = when (val holder = context.holder) {
-						is Node.Object -> holder.functions[node.identifier]
-						is Node.File -> holder.functions[node.identifier]
-						else -> files.firstNotNullOfOrNull { it.functions[node.identifier] }
-					}
-
-					checkNotNull(function) {
-						"Unknown function: ${node.identifier}(${node.arguments.map { runNode(it, context) }})"
-					}
-
-					//val function = functionFile.functions.getValue(node.identifier)
-
-					function.params.forEachIndexed { index, parameter ->
-						check(parameter is Node.Parameter.Basic) {
-							"Crescent doesn't support parameters with default values yet."
-						}
-						checkIsSameType(parameter.type, argumentValues[index]) {
-							"Parameter ${parameter.name} had an argument of type ${findType(argumentValues[index])}, expected ${parameter.type}"
-						}
-					}
-
-					return runFunction(function, argumentValues, context)
+				val (functionFile, function) = findFunction(node.identifier, context)
+					?: throw CrescentRuntimeException(context.file.path, "Unknown function: ${node.identifier}(${argumentValues.joinToString { it.asString() }})")
+				val functionContext = context.copy(file = functionFile)
+				return if (CrescentToken.Modifier.ASYNC in function.modifiers) {
+					Instance.Future(CompletableFuture.supplyAsync({ runFunction(function, argumentValues, functionContext) }, coroutineExecutor))
+				} else {
+					runFunction(function, argumentValues, functionContext)
 				}
 			}
 
@@ -773,6 +847,11 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 				this.name
 			}
 
+			is Instance.Struct -> "${this.name}(${this.variables.values.joinToString { "${it.name}=${it.instance.asNode().asString()}" }})"
+			is Instance.Object -> this.name
+			is Instance.Enum -> this.entryName
+			is Instance.Future -> if (this.value.isDone) this.value.join().asString() else "Future(pending)"
+
 			else -> {
 				// TODO: Attempt to find a toString()
 				error("Unknown node ${this::class}")
@@ -783,6 +862,7 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 	fun findType(value: Node) = when (value) {
 
+		is Instance -> value.type
 		is Node.Typed -> value.type
 		is Type.Basic -> value
 		is Node.Array -> Type.Array(Type.any) // TODO: Do better
@@ -800,7 +880,7 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 		else -> error("Unexpected value: ${value::class}")
 	}
 
-	inline fun checkIsSameType(parameter: Node.Parameter, value: Node, errorBlock: (parameterType: Type) -> String) =
+	fun checkIsSameType(parameter: Node.Parameter, value: Node, errorBlock: (parameterType: Type) -> String) =
 		when (parameter) {
 
 			is Node.Parameter.Basic -> {
@@ -809,11 +889,16 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 				}
 			}
 
-			else -> TODO()
+			is Node.Parameter.WithDefault -> {
+				checkIsSameType(parameter.type, value) {
+					errorBlock(parameter.type)
+				}
+			}
 		}
 
 	// TODO: Use typeOf instead
-	inline fun checkIsSameType(type: Type, value: Node, errorBlock: () -> String) = when (type) {
+	fun checkIsSameType(type: Type, value: Node, errorBlock: () -> String): Unit {
+		when (type) {
 
 		/*
         is Type.Array -> {
@@ -823,12 +908,12 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
         */
 
 		is Type.Array -> {
-			// TODO: Implement this
+			check(value is Node.Array && value.values.all { isAssignable(type.type, it) }) { errorBlock() }
 		}
 
 		is Type.Basic -> {
 			if (type != Type.any) {
-				check(type == findType(value)) {
+				check(isAssignable(type, value)) {
 					errorBlock()
 					"Expected ${type.name}, got ${value::class.qualifiedName}"
 				}
@@ -837,13 +922,120 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 			}
 		}
 
+		is Type.Implicit -> Unit
+		is Type.Result -> checkIsSameType(type.type, value, errorBlock)
 		else -> {
 			error("Expected $type, got ${value::class.qualifiedName}")
+		}
+		}
+	}
+
+	fun isAssignable(expected: Type, value: Node): Boolean {
+		if (expected == Type.any || expected is Type.Implicit) return true
+		if (expected is Type.Basic && expected.name in numericTypeNames && value is Primitive.Number) return true
+		val actual = findType(value)
+		if (expected == actual) return true
+		if (expected is Type.Array && value is Node.Array) return value.values.all { isAssignable(expected.type, it) }
+		if (expected !is Type.Basic || actual !is Type.Basic) return false
+
+		val sealed = files.asSequence().flatMap { it.sealeds.values.asSequence() }.firstOrNull { it.name == expected.name }
+		if (sealed != null && (sealed.structs.any { it.name == actual.name } || sealed.objects.any { it.name == actual.name })) return true
+
+		return files.any { file ->
+			file.impls.values.firstOrNull { it.type == actual }?.extends?.any { it == expected } == true
+		}
+	}
+
+	private val numericTypeNames = setOf("I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64")
+
+	private fun valuesEqual(left: Node, right: Node): Boolean = when {
+		left is Primitive.Number && right is Primitive.Number -> left.toF64().data == right.toF64().data
+		left is Instance.Enum && right is Instance.Enum -> left.name == right.name && left.entryName == right.entryName
+		else -> left == right
+	}
+
+	private fun instanceOf(value: Node): Instance = value as? Instance ?: Instance.Node(findType(value), value)
+
+	private fun Instance.asNode(): Node = when (this) {
+		is Instance.Node -> value
+		else -> this
+	}
+
+	private fun assignValue(identifier: Node.Identifier, value: Node, context: BlockContext) {
+		val variable = context.variables[identifier.name]
+			?: (context.holder as? Instance.Struct)?.variables?.get(identifier.name)
+			?: (context.holder as? Instance.Object)?.variables?.get(identifier.name)
+			?: throw CrescentRuntimeException(context.file.path, "Variable ${identifier.name} was not found for reassignment")
+
+		check(!variable.isFinal) { "Variable ${variable.name} is not mutable" }
+		checkIsSameType(variable.instance.type, value) {
+			"Variable ${variable.name}: ${variable.instance.type} cannot be assigned to ${findType(value)}"
+		}
+		variable.instance = instanceOf(value)
+	}
+
+	private fun findStruct(name: String): Node.Struct? = files.firstNotNullOfOrNull { file ->
+		file.structs[name] ?: file.sealeds.values.firstNotNullOfOrNull { sealed -> sealed.structs.firstOrNull { it.name == name } }
+	}
+
+	private fun findObject(name: String): Node.Object? = files.firstNotNullOfOrNull { file ->
+		file.objects[name] ?: file.sealeds.values.firstNotNullOfOrNull { sealed -> sealed.objects.firstOrNull { it.name == name } }
+	}
+
+	private fun findEnum(name: String): Node.Enum? = files.firstNotNullOfOrNull { it.enums[name] }
+
+	private fun instantiateEnum(
+		enum: Node.Enum,
+		entryName: String,
+		context: BlockContext,
+		overrideArguments: List<Node>? = null,
+	): Instance.Enum {
+		val entry = enum.structs.firstOrNull { it.name == entryName }
+			?: throw CrescentRuntimeException(context.file.path, "Enum ${enum.name} has no entry named $entryName")
+		val values = overrideArguments ?: entry.arguments.map { runNode(it, context) }
+		check(values.size == enum.parameters.size) {
+			"Enum entry ${enum.name}.$entryName expects ${enum.parameters.size} values, got ${values.size}"
+		}
+		val properties = enum.parameters.mapIndexed { index, parameter ->
+			checkIsSameType(parameter, values[index]) { "Enum property ${parameter.name} has the wrong type" }
+			parameter.name to Variable(parameter.name, instanceOf(values[index]), true)
+		}.toMap()
+		return Instance.Enum(enum.name, entryName, properties)
+	}
+
+	private fun findFunction(name: String, context: BlockContext): Pair<Node.File, Node.Function>? {
+		return when (val holder = context.holder) {
+			is Instance.Struct -> files.firstNotNullOfOrNull { file -> file.impls.values.firstOrNull { it.type == holder.type }?.functions?.firstOrNull { it.name == name }?.let { file to it } }
+			is Instance.Enum -> files.firstNotNullOfOrNull { file -> file.impls.values.firstOrNull { it.type == holder.type }?.functions?.firstOrNull { it.name == name }?.let { file to it } }
+			is Instance.Object -> files.firstNotNullOfOrNull { file -> file.objects[holder.name]?.functions?.get(name)?.let { file to it } }
+			is Type.Basic -> files.firstNotNullOfOrNull { file -> file.staticImpls.values.firstOrNull { it.type == holder }?.functions?.firstOrNull { it.name == name }?.let { file to it } }
+			is Node.Object -> holder.functions[name]?.let { context.file to it }
+			is Node.File -> holder.functions[name]?.let { holder to it }
+			else -> null
+		} ?: context.file.functions[name]?.let { context.file to it }
+			?: files.firstNotNullOfOrNull { file -> file.functions[name]?.let { file to it } }
+	}
+
+	private fun validateTraits() {
+		for (file in files) {
+			for (implementation in file.impls.values) {
+				for (extendedType in implementation.extends) {
+					val traitName = (extendedType as? Type.Basic)?.name ?: continue
+					val trait = files.firstNotNullOfOrNull { it.traits[traitName] } ?: continue
+					for (required in trait.functionTraits) {
+						val function = implementation.functions.firstOrNull { it.name == required.name }
+							?: throw CrescentRuntimeException(file.path, "${implementation.type} must implement ${trait.name}.${required.name}")
+						check(function.params.map { (it as Node.Typed).type } == required.params.map { (it as Node.Typed).type } && function.returnType == required.returnType) {
+							"${implementation.type}.${function.name} does not match trait ${trait.name}"
+						}
+					}
+				}
+			}
 		}
 	}
 
 
-	sealed class Instance {
+	sealed class Instance : Node {
 
 		abstract val type: Type
 
@@ -859,6 +1051,18 @@ class CrescentVM(val files: List<Node.File>, val mainFile: Node.File) {
 
 			override val type = Type.Basic(name)
 
+		}
+
+		data class Enum(
+			val name: String,
+			val entryName: String,
+			val properties: Map<String, Variable>,
+		) : Instance() {
+			override val type = Type.Basic(name)
+		}
+
+		data class Future(val value: CompletableFuture<CrescentAST.Node>) : Instance() {
+			override val type = Type.Basic("Future")
 		}
 
 		data class Object(

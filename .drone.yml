@@ -9,6 +9,6 @@ platform:
 steps:
 
 - name: test
-  image: gradle:latest
+  image: gradle:9.5.0-jdk21
   commands:
   - gradle build --no-daemon

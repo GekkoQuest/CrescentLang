@@ -67,10 +67,11 @@ object CrescentParser {
 
 				CrescentToken.Type.IMPL -> {
 					readImpl(tokenIterator).let {
+						val typeName = (it.type as? CrescentAST.Node.Type.Basic)?.name ?: "${it.type}"
 						if (CrescentToken.Modifier.STATIC in it.modifiers) {
-							staticImpls["${it.type}"] = it
+							staticImpls[typeName] = it
 						} else {
-							impls["${it.type}"] = it
+							impls[typeName] = it
 						}
 					}
 				}
@@ -372,11 +373,13 @@ object CrescentParser {
 
 	private fun readImpl(tokenIterator: PeekingTokenIterator): CrescentAST.Node.Impl {
 
-		lateinit var type: CrescentAST.Node.Type
+		var type: CrescentAST.Node.Type? = null
 
 		val functions = mutableListOf<CrescentAST.Node.Function>()
+		val extendedTypes = mutableListOf<CrescentAST.Node.Type>()
 		val readModifiers = mutableListOf<CrescentToken.Modifier>()
 		val implModifiers = mutableListOf<CrescentToken.Modifier>()
+		var readingExtendedTypes = false
 
 		var readVisibility = CrescentToken.Visibility.PUBLIC
 
@@ -385,14 +388,22 @@ object CrescentParser {
 			when (token) {
 
 				CrescentToken.Bracket.OPEN, is CrescentToken.Data.Comment, CrescentToken.Parenthesis.OPEN, CrescentToken.Parenthesis.CLOSE -> {
+					readingExtendedTypes = false
 					/*NOOP*/
 				}
 
 				is CrescentToken.Key, CrescentToken.SquareBracket.OPEN -> {
 					tokenIterator.back() // UnSkip type start
-					type = readType(tokenIterator)
-					implModifiers.addAll(readModifiers)
+					if (type == null) {
+						type = readType(tokenIterator)
+						implModifiers.addAll(readModifiers)
+					} else if (readingExtendedTypes) {
+						extendedTypes += readType(tokenIterator)
+					}
 				}
+
+				CrescentToken.Operator.TYPE_PREFIX -> readingExtendedTypes = true
+				CrescentToken.Operator.COMMA -> Unit
 
 				is CrescentToken.Modifier -> {
 					readModifiers += token
@@ -415,7 +426,7 @@ object CrescentParser {
 			readVisibility = CrescentToken.Visibility.PUBLIC
 		}
 
-		return CrescentAST.Node.Impl(type, implModifiers, emptyList(), functions)
+		return CrescentAST.Node.Impl(checkNotNull(type) { "An impl declaration requires a target type" }, implModifiers.toList(), extendedTypes, functions)
 	}
 
 
@@ -440,7 +451,7 @@ object CrescentParser {
 
 		return CrescentAST.Node.Function(
 			name,
-			modifiers,
+			modifiers.toList(),
 			visibility,
 			parameters,
 			type,
@@ -673,8 +684,7 @@ object CrescentParser {
 		checkEquals(CrescentToken.Parenthesis.OPEN, tokenIterator.next())
 		val parameters = mutableListOf<CrescentAST.Node.Parameter>()
 
-		// TODO: Count opens and closes
-		// TODO: Support default values
+		var foundDefault = false
 		while (tokenIterator.peekNext() != CrescentToken.Parenthesis.CLOSE) {
 
 			val names = tokenIterator.nextUntil { it !is CrescentToken.Key }.map {
@@ -683,9 +693,24 @@ object CrescentParser {
 
 			checkEquals(CrescentToken.Operator.TYPE_PREFIX, tokenIterator.next())
 			val type = readType(tokenIterator)
+			val defaultValue = if (tokenIterator.peekNext() == CrescentToken.Operator.ASSIGN) {
+				tokenIterator.next()
+				foundDefault = true
+				when (val value = readExpression(tokenIterator)) {
+					is CrescentAST.Node.Expression -> value
+					else -> CrescentAST.Node.Expression(listOf(value))
+				}
+			} else {
+				check(!foundDefault) { "Required parameters cannot follow default parameters" }
+				null
+			}
 
 			names.forEach { name ->
-				parameters += CrescentAST.Node.Parameter.Basic(name, type)
+				parameters += if (defaultValue == null) {
+					CrescentAST.Node.Parameter.Basic(name, type)
+				} else {
+					CrescentAST.Node.Parameter.WithDefault(name, type, defaultValue)
+				}
 			}
 
 			if (tokenIterator.peekNext() != CrescentToken.Parenthesis.CLOSE) {

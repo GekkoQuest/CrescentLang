@@ -1,49 +1,54 @@
 package dev.twelveoclock.lang.crescent.ptir
-/*
+
 import dev.twelveoclock.lang.crescent.data.TestCode
+import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node
+import dev.twelveoclock.lang.crescent.language.token.CrescentToken
 import dev.twelveoclock.lang.crescent.lexers.CrescentLexer
 import dev.twelveoclock.lang.crescent.parsers.CrescentParser
-import dev.twelveoclock.lang.crescent.translators.CrescentToPTIR
-import org.junit.jupiter.api.Test
-import tech.poder.ir.vm.VirtualMachine
-import java.nio.file.Paths
+import dev.twelveoclock.lang.crescent.translators.KotlinToCrescentTranslator
+import dev.twelveoclock.lang.crescent.translators.PoderTechIrInstruction
+import dev.twelveoclock.lang.crescent.translators.PoderTechIrTranslator
 import kotlin.io.path.Path
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class TranslatorTest {
 
 	@Test
-	fun helloWorld() {
-		val file = CrescentParser.invoke(Path("Test", "example.crescent").toAbsolutePath(), CrescentLexer.invoke(TestCode.helloWorlds))
-		val trans = CrescentToPTIR()
-		val code = trans.translate(Paths.get("Test").toAbsolutePath(), file)
-		println(code.joinToString("\n") { it.asCode().toString() })
-		VirtualMachine.exec(code[0].asCode(), 1u)
+	fun poderTechIrTranslatorLowersFunctionsAndCalls() {
+		val file = CrescentParser.invoke(Path("hello.crescent"), CrescentLexer.invoke(TestCode.helloWorlds))
+		val module = PoderTechIrTranslator.translate(file).modules.single()
+		val main = module.methods.single { it.name == "main" }
+
+		assertEquals("hello", module.name)
+		assertEquals(3, main.instructions.filterIsInstance<PoderTechIrInstruction.Invoke>().count { it.name == "println" })
 	}
 
 	@Test
-	fun helloWorldWithArgs() {
-		val file = CrescentParser.invoke(Path("Test", "example.crescent").toAbsolutePath(), CrescentLexer.invoke(TestCode.argsHelloWorld))
-		val trans = CrescentToPTIR()
-		val code = trans.translate(Paths.get("Test").toAbsolutePath(), file)
-		println(code.joinToString("\n") { it.asCode().toString() })
-		VirtualMachine.exec(code[0].asCode(), 1u, listOf("Hello World!"))
+	fun kotlinTranslatorProducesParseableCrescent() {
+		val kotlinSource =
+			"""
+				suspend fun answer(value: Int = 41): Int {
+					return value + 1
+				}
+
+				fun main(args: Array<String>): Unit {
+					val limit: Int = 1
+					for (index in 0..limit) {
+						println(index)
+					}
+				}
+			""".trimIndent()
+
+		val crescentSource = KotlinToCrescentTranslator.translate(kotlinSource)
+		val file = CrescentParser.invoke(Path("translated.crescent"), CrescentLexer.invoke(crescentSource))
+		val answer = file.functions.getValue("answer")
+
+		assertTrue(CrescentToken.Modifier.ASYNC in answer.modifiers)
+		assertIs<Node.Parameter.WithDefault>(answer.params.single())
+		assertEquals(Node.Type.Basic("I32"), answer.returnType)
+		assertEquals(Node.Type.Array(Node.Type.Basic("String")), file.mainFunction!!.params.single().let { (it as Node.Typed).type })
 	}
-
-	/*@Test
-	fun funThing() {
-		val file = CrescentParser.invoke(Path("Test", "example.crescent").toAbsolutePath(), CrescentLexer.invoke(TestCode.funThing))
-		val trans = CrescentToPTIR()
-		val code = trans.translate(Paths.get("Test").toAbsolutePath(), file)
-		println(code.joinToString("\n") { it.asCode().toString() })
-		VirtualMachine.exec(code[0].asCode(), 1u)
-	}*/
-
-	/*@Test
-	fun ifStatement() {
-		val file = CrescentParser.invoke(Path("Test", "example.crescent").toAbsolutePath(), CrescentLexer.invoke(TestCode.ifStatement))
-		val trans = CrescentToPTIR()
-		val code = trans.translate(Paths.get("Test").toAbsolutePath(), file)
-		println(code.joinToString("\n") { it.asCode().toString() })
-		VirtualMachine.exec(code[0].asCode(), 1u)
-	}*/
-}*/
+}

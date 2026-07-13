@@ -1,9 +1,9 @@
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     idea
     application
-    kotlin("jvm") version "1.8.0"
+    kotlin("jvm") version "2.4.0"
 }
 
 group = "dev.twelveoclock.lang"
@@ -14,43 +14,26 @@ repositories {
 }
 
 dependencies {
-    implementation(platform(kotlin("bom")))
-    implementation(kotlin("stdlib-jdk8"))
     implementation(kotlin("reflect"))
 
-    implementation("org.capnproto:runtime:0.1.14")
-    implementation("com.guardsquare:proguard-core:9.0.7")
-    //implementation("tech.poder.ir:PoderTechIR:+")
+    testImplementation(platform("org.junit:junit-bom:6.1.2"))
     testImplementation(kotlin("test-junit5"))
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 application {
     mainClass.set("dev.twelveoclock.lang.crescent.Main")
-    applicationDefaultJvmArgs = listOf(
-        "--add-modules=jdk.incubator.foreign"
-    )
+}
+
+kotlin {
+    jvmToolchain(21)
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_21)
+    }
 }
 
 tasks {
-
-    val javaVersion = JavaVersion.VERSION_17.toString()
-
-    withType<KotlinCompile> {
-        //sourceCompatibility = javaVersion
-        //targetCompatibility = javaVersion
-        kotlinOptions.jvmTarget = javaVersion
-        //kotlinOptions.languageVersion = "1.6"
-        //kotlinOptions.apiVersion = "1.6"
-        //kotlinOptions.useFir = true
-    }
-
-    withType<JavaCompile> {
-        sourceCompatibility = javaVersion
-        targetCompatibility = javaVersion
-    }
-
     test {
         useJUnitPlatform()
-        jvmArgs("--add-modules=jdk.incubator.foreign")
     }
 }

@@ -1,7 +1,5 @@
-rootProject.name = "CrescentLang"
-
-sourceControl {
-    gitRepository(java.net.URI.create("https://github.com/Moocow9m/PoderTechIR.git")) {
-        producesModule("tech.poder.ir:PoderTechIR")
-    }
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
+
+rootProject.name = "CrescentLang"
