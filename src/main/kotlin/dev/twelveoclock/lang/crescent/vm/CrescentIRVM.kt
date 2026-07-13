@@ -33,9 +33,14 @@ fun main() {
 class CrescentIRVM(crescentIR: CrescentIR) {
 
 	val sectionedCrescentIR = SectionedCrescentIR.from(crescentIR)
+	private val program = crescentIR.commands.singleOrNull() as? CrescentIR.Command.Program
 
 
 	fun invoke(args: List<String> = emptyList()) {
+		program?.let {
+			CrescentVM(it.files, it.mainFile).invoke(args)
+			return
+		}
 		runFunction("main", LinkedList<Any>(), mapOf("args" to args))
 	}
 
@@ -216,7 +221,7 @@ class CrescentIRVM(crescentIR: CrescentIR) {
 
 						"print" -> print(stack.pop())
 						"println" -> println(stack.pop())
-						"readLine" -> stack.push(readLine())
+						"readLine" -> stack.push(readlnOrNull())
 
 						else -> {
 							runFunction(node.name, stack)

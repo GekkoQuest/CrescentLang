@@ -29,22 +29,24 @@ internal class CrescentIRVMTests {
 		try {
 			System.setOut(printStream)
 			block()
-			System.setOut(originalSystemOut)
 		}
 		finally {
+			System.setOut(originalSystemOut)
 			if (alsoPrintToConsole) {
-				System.setOut(originalSystemOut)
 				println(byteArrayOutputStream.toString())
 			}
 		}
 
-		return byteArrayOutputStream.toString()
+		return byteArrayOutputStream.toString().replace("\r\n", "\n")
 	}
 
 	private inline fun fakeUserInput(input: String, block: () -> Unit) {
-		System.setIn(ByteArrayInputStream(input.toByteArray()))
-		block()
-		System.setIn(originalSystemIn)
+		try {
+			System.setIn(ByteArrayInputStream(input.toByteArray()))
+			block()
+		} finally {
+			System.setIn(originalSystemIn)
+		}
 	}
 
 
@@ -74,7 +76,7 @@ internal class CrescentIRVMTests {
 		assertEquals(
 			"Hello World\n",
 			collectSystemOut {
-				CrescentIRVM(CrescentIRCompiler.invoke(file)).invoke()
+				CrescentIRVM(CrescentIRCompiler.invoke(file)).invoke(listOf("Hello World"))
 			}
 		)
 	}
@@ -96,6 +98,8 @@ internal class CrescentIRVMTests {
 				-5
 				Meow
 				Meow
+				Cats
+				Basic(Unit)
 				
 			""".trimIndent(),
 			collectSystemOut {
@@ -110,14 +114,14 @@ internal class CrescentIRVMTests {
 		val file = CrescentParser.invoke(Path("example.crescent"), CrescentLexer.invoke(TestCode.ifStatement))
 
 		assertEquals(
-			"Meow\n",
+			"Meow\nMeow\n",
 			collectSystemOut {
 				CrescentIRVM(CrescentIRCompiler.invoke(file)).invoke(listOf("true"))
 			}
 		)
 
 		assertEquals(
-			"Hiss\n",
+			"Hiss\nHiss\n",
 			collectSystemOut {
 				CrescentIRVM(CrescentIRCompiler.invoke(file)).invoke(listOf("false"))
 			}

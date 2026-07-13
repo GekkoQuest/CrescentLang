@@ -26,21 +26,23 @@ internal class CrescentVMTests {
 		try {
 			System.setOut(printStream)
 			block()
-			System.setOut(originalSystemOut)
 		} finally {
+			System.setOut(originalSystemOut)
 			if (alsoPrintToConsole) {
-				System.setOut(originalSystemOut)
 				println(byteArrayOutputStream.toString())
 			}
 		}
 
-		return byteArrayOutputStream.toString()
+		return byteArrayOutputStream.toString().replace("\r\n", "\n")
 	}
 
 	private inline fun fakeUserInput(input: String, block: () -> Unit) {
-		System.setIn(ByteArrayInputStream(input.toByteArray()))
-		block()
-		System.setIn(originalSystemIn)
+		try {
+			System.setIn(ByteArrayInputStream(input.toByteArray()))
+			block()
+		} finally {
+			System.setIn(originalSystemIn)
+		}
 	}
 
 
@@ -244,6 +246,8 @@ internal class CrescentVMTests {
 
 		assertEquals(
 			""" 
+				Example(aNumber=1, aValue1=Mew, aValue2=Meow)
+				1
 				Mew
 				Meow
 				
@@ -251,6 +255,79 @@ internal class CrescentVMTests {
 			collectSystemOut(true) {
 				CrescentVM(listOf(file), file).invoke()
 			}
+		)
+	}
+
+	@Test
+	fun implMethods() {
+		val file = CrescentParser.invoke(Path("example.crescent"), CrescentLexer.invoke(TestCode.impl))
+
+		assertEquals(
+			"""
+				1
+				Meow
+				Mew
+
+				1
+				Meow
+				Mew
+				3
+				-1
+
+			""".trimIndent(),
+			collectSystemOut { CrescentVM(listOf(file), file).invoke() },
+		)
+	}
+
+	@Test
+	fun traitsEnumsDefaultsAsyncAndMultipleFiles() {
+		val library = CrescentParser.invoke(
+			Path("library.crescent"),
+			CrescentLexer.invoke(
+				"""
+					trait Named {
+						fun name() -> String
+					}
+
+					struct Cat(val value: String)
+
+					impl Cat : Named {
+						fun name() -> String { -> value }
+					}
+
+					fun greet(name: String = "Moon") -> String { -> "Hello " + name }
+					async fun answer() -> I32 { -> 42 }
+				""".trimIndent(),
+			),
+		)
+		val main = CrescentParser.invoke(
+			Path("main.crescent"),
+			CrescentLexer.invoke(
+				"""
+					enum Color(label: String) {
+						RED("red")
+						BLUE("blue")
+					}
+
+					fun main {
+						val cat = Cat("Luna")
+						println(cat.name())
+						println(greet())
+						println(await(answer()))
+						val color = Color.RED
+						println(color.label)
+						when(color) {
+							.RED -> { println("matched") }
+							else -> { println("missed") }
+						}
+					}
+				""".trimIndent(),
+			),
+		)
+
+		assertEquals(
+			"Luna\nHello Moon\n42\nred\nmatched\n",
+			collectSystemOut { CrescentVM(listOf(main, library), main).invoke() },
 		)
 	}
 

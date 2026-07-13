@@ -33,7 +33,7 @@ object ShuntingYard {
 
 				is CrescentToken.Operator -> {
 
-					while (operatorStack.isNotEmpty() && precedence(operatorStack.first) <= precedence(next)) {
+					while (operatorStack.isNotEmpty() && precedence(operatorStack.first()) <= precedence(next)) {
 						outputQueue.add(operatorStack.pop())
 					}
 

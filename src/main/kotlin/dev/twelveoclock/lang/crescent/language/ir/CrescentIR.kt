@@ -16,16 +16,19 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 
 			var sectionCommands = mutableListOf<CrescentIR.Command>()
 			val sections = mutableMapOf<Section, MutableMap<String, List<CrescentIR.Command>>>()
+			fun flushSection() {
+				val section = lastSection ?: return
+				val name = requireNotNull(lastName)
+				sections.getOrPut(section) { mutableMapOf() }[name] = sectionCommands
+				sectionCommands = mutableListOf()
+			}
 
 			crescentIR.commands.forEach {
 				when (it) {
 
 					is CrescentIR.Command.Fun -> {
 
-						if (lastSection != null) {
-							sections.getOrPut(lastSection!!) { mutableMapOf() }[lastName!!] = sectionCommands
-							sectionCommands = mutableListOf()
-						}
+						flushSection()
 
 						lastSection = Section.FUNCTION
 						lastName = it.name
@@ -33,10 +36,7 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 
 					is CrescentIR.Command.Struct -> {
 
-						if (lastSection != null) {
-							sections.getOrPut(lastSection!!) { mutableMapOf() }[lastName!!] = sectionCommands
-							sectionCommands = mutableListOf()
-						}
+						flushSection()
 
 						lastSection = Section.STRUCT
 						lastName = it.name
@@ -48,10 +48,7 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 				}
 			}
 
-			if (lastSection != null) {
-				sections.getOrPut(lastSection!!) { mutableMapOf() }[lastName!!] = sectionCommands
-				sectionCommands = mutableListOf()
-			}
+			flushSection()
 
 			return SectionedCrescentIR(sections)
 		}
@@ -77,6 +74,15 @@ value class CrescentIR(val commands: List<Command>) {
 	*/
 
 	sealed interface Command {
+
+		/**
+		 * A linked, typed Crescent program. This is the canonical high-level IR command;
+		 * the lower-level stack commands remain supported for serialized legacy IR.
+		 */
+		data class Program(
+			val files: List<dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node.File>,
+			val mainFile: dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node.File,
+		) : Command
 
 		// These aren't needed, in fact loops aren't needed in the IR, just if statements and jumps
 		/*
