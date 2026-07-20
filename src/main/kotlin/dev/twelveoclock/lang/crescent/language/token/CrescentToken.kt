@@ -2,12 +2,7 @@ package dev.twelveoclock.lang.crescent.language.token
 
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST
 
-// TODO: Make a way to reconstruct the code through .toString
-// TODO: Add ++ and --
-// TODO: Add Operator keyword
-// TODO: Error keyword
-// TODO: Maybe remove majority of these and let the parser determine it, EX: Import, while
-// TODO: Store line numbers, start/end char positions
+// The legacy token API does not yet carry source spans; lexer/parser diagnostics track offsets separately.
 interface CrescentToken {
 
 	// Used only by the token iterator
@@ -36,7 +31,6 @@ interface CrescentToken {
 			}
 		}
 
-		// TODO: Take in expressions
 		@JvmInline
 		value class String(
 			val kotlinString: kotlin.String
@@ -134,14 +128,12 @@ interface CrescentToken {
 
 
 	enum class Keyword(val literal: String) : CrescentToken, CrescentAST.Node {
-		SELF("self"),
 		BREAK("break"),
 		CONTINUE("continue"),
 	}
 
-	// TODO: Precedence
+	// Expression precedence and associativity are centralized in ShuntingYard.
 	enum class Operator(val literal: String) : CrescentToken, CrescentAST.Node {
-		//NEW_LINE("\n"),
 		NOT("!"),
 		ADD("+"),
 		SUB("-"),
@@ -165,7 +157,7 @@ interface CrescentToken {
 		GREATER_EQUALS_COMPARE(">="),
 		BIT_SHIFT_RIGHT("shr"),
 		BIT_SHIFT_LEFT("shl"),
-		UNSIGNED_BIT_SHIFT_RIGHT("ushr"), // Left isn't needed
+		UNSIGNED_BIT_SHIFT_RIGHT("ushr"),
 		BIT_OR("or"),
 		BIT_XOR("xor"),
 		BIT_AND("and"),
@@ -184,33 +176,6 @@ interface CrescentToken {
 		IMPORT_SEPARATOR("::"),
 		INSTANCE_OF("is"),
 		NOT_INSTANCE_OF("!is"),
-	}
-
-	enum class Primitive : CrescentToken {
-
-		I8,
-		I16,
-		I32,
-		I64,
-
-		U8,
-		U16,
-		U32,
-		U64,
-
-		F32,
-		F64,
-
-		// Other types built into the language
-		//Array,
-		//List,
-		//Map,
-		//Tensor,
-		//Char,
-		//Text,
-		//Fun,
-		//Time,
-		//Struct
 	}
 
 }

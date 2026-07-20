@@ -4,6 +4,7 @@ class PeekingCharIterator(val input: String) : Iterator<Char> {
 
 	@PublishedApi
 	internal var index = 0
+	val position: Int get() = index
 
 
 	override fun hasNext(): Boolean {
@@ -11,11 +12,15 @@ class PeekingCharIterator(val input: String) : Iterator<Char> {
 	}
 
 	override fun next(): Char {
+		if (!hasNext()) throw NoSuchElementException("No character at offset $index")
 		return input[index++]
 	}
 
 
 	fun next(size: Int): String {
+		require(size >= 0) { "size must not be negative" }
+		val available = input.length - index
+		if (size > available) throw NoSuchElementException("Cannot read $size characters at offset $index; $available remain")
 		index += size
 		return input.substring(index - size, index)
 	}
@@ -43,113 +48,13 @@ class PeekingCharIterator(val input: String) : Iterator<Char> {
 	}
 
 
-	fun nextUntilAndSkip(char: Char): String {
-		return nextUntilAndSkip {
-			it == char
-		}
-	}
-
-	fun nextUntilAndSkip(chars: Set<Char>): String {
-		return nextUntilAndSkip {
-			it in chars
-		}
-	}
-
-	inline fun nextUntilAndSkip(predicate: (Char) -> Boolean): String {
-
-		val result = nextUntil(predicate)
-		next()
-
-		return result
-	}
-
-	/*
-
-	fun nextUntilAndSkip(vararg chars: Char): String {
-
-		val read = nextUntil(*chars)
-		index = (index + 1).coerceAtMost(input.length)
-
-		return read
-	}
-
-	fun nextUntilAndSkip(predicate: (Char) -> Boolean): String {
-
-		val read = nextUntil(predicate)
-		index = (index + 1).coerceAtMost(input.length)
-
-		return read
-	}
-
-	fun nextUntilAndKeep(vararg chars: Char): String {
-
-		val minIndex = chars
-			.map { input.indexOf(it, index) }
-			.filter { it != -1 }
-			.min()
-			?: input.length
-
-		index = minIndex - 1
-
-		return input.substring(index, minIndex)
-	}
-
-	fun nextUntilAndKeep(predicate: (Char) -> Boolean): String {
-
-		val outputBuilder = StringBuilder()
-
-		while (index < input.length) {
-
-			val nextChar = input[index++]
-			outputBuilder.append(nextChar)
-
-			if (predicate(nextChar)) {
-				break
-			}
-		}
-
-		return outputBuilder.toString()
-	}*/
-
-
-	/*
-	fun hasPrev(): Boolean {
-		return nextIndex > 0
-	}
-
-	fun prev(): Char {
-		nextIndex--
-		return input[nextIndex]
-	}
-	*/
-
-
 	fun peekNext(amount: Int = 1): Char {
-		return input[index + (amount - 1)]
+		return peekNextOrNull(amount) ?: throw NoSuchElementException("No character $amount position(s) ahead of offset $index")
 	}
 
-	fun peekBack(amount: Int = 1): Char {
-		return input[index - amount]
-	}
-
-
-	inline fun peekNextUntil(predicate: (Char) -> Boolean): String {
-
-		var nextPeekIndex = index
-		val outputBuilder = StringBuilder()
-
-		while (nextPeekIndex < input.length) {
-
-			val nextChar = input[nextPeekIndex++]
-
-			if (!predicate(nextChar)) {
-				break
-			}
-
-			outputBuilder.append(nextChar)
-		}
-
-		return outputBuilder.toString()
+	fun peekNextOrNull(amount: Int = 1): Char? {
+		require(amount > 0) { "amount must be positive" }
+		return input.getOrNull(index + amount - 1)
 	}
 
 }

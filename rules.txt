@@ -1,3 +1,0 @@
-Variable name: Lower Camel Case by force
-Function name: Lower Camel Case by force
-Package name: Lower case by force

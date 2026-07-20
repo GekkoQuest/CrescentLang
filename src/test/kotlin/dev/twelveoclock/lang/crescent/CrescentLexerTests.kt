@@ -1,16 +1,34 @@
 package dev.twelveoclock.lang.crescent
 
 import dev.twelveoclock.lang.crescent.data.TestCode
+import dev.twelveoclock.lang.crescent.iterator.PeekingTokenIterator
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken.*
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken.Operator.*
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken.Statement.*
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken.Type.*
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken.Variable.*
 import dev.twelveoclock.lang.crescent.lexers.CrescentLexer
+import java.math.BigInteger
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 internal class CrescentLexerTests {
+
+	@Test
+	fun sourceMetadataPreservesStatementAndEscapedDollarBoundaries() {
+		val tokens = CrescentLexer.invoke(""""\${'$'}name" "\\${'$'}name"
+next""")
+		assertContentEquals(listOf(Data.String("${'$'}name"), Data.String("\\${'$'}name"), Key("next")), tokens)
+
+		val iterator = PeekingTokenIterator(tokens)
+		iterator.next()
+		assertContentEquals(listOf(0), iterator.escapedDollarOffsetsForLastToken().toList())
+		iterator.next()
+		assertTrue(iterator.escapedDollarOffsetsForLastToken().isEmpty())
+		assertTrue(iterator.isAtStatementBoundary)
+	}
 
     @Test
     fun helloWorld() {
@@ -31,15 +49,76 @@ internal class CrescentLexerTests {
 
     @Test
     fun argsHelloWorld() {
-
-        //val tokens = CrescentLexer.invoke(TestCode.helloWorlds)
-
+        assertContentEquals(
+            listOf(
+                FUN, Key("main"), Parenthesis.OPEN,
+                Key("args"), TYPE_PREFIX, SquareBracket.OPEN, Key("String"), SquareBracket.CLOSE,
+                Parenthesis.CLOSE, Bracket.OPEN,
+                Key("println"), Parenthesis.OPEN,
+                Key("args"), SquareBracket.OPEN, Data.Number(0.toByte()), SquareBracket.CLOSE,
+                Parenthesis.CLOSE, Bracket.CLOSE,
+            ),
+            CrescentLexer.invoke(TestCode.argsHelloWorld),
+        )
     }
 
     @Test
     fun funThing() {
-
+		val tokens = CrescentLexer.invoke(TestCode.funThing)
+		assertTrue(tokens.contains(FUN))
+		assertTrue(tokens.contains(Key("funThing8")))
+		assertTrue(tokens.windowed(2).any { it == listOf(SUB, Data.Number(5.toByte())) })
     }
+
+	@Test
+	fun longestOperatorsIdentifiersAndEofAreHandled() {
+		assertContentEquals(
+			listOf(
+				Key("_leading"), Key("with_underscore"),
+				EQUALS_REFERENCE_COMPARE, NOT_EQUALS_REFERENCE_COMPARE,
+				NOT_CONTAINS, NOT_INSTANCE_OF, ADD,
+			),
+			CrescentLexer.invoke("_leading with_underscore === !== !in !is +"),
+		)
+	}
+
+	@Test
+	fun integralTokensReachUnsignedLongMaximumWithoutSignedOverflow() {
+		assertContentEquals(
+			listOf(Data.Number(Long.MAX_VALUE), Data.Number(BigInteger("9223372036854775808")), Data.Number(BigInteger("18446744073709551615"))),
+			CrescentLexer.invoke("9223372036854775807 9223372036854775808 18446744073709551615"),
+		)
+		val error = assertFailsWith<IllegalArgumentException> { CrescentLexer.invoke("18446744073709551616") }
+		assertTrue(error.message.orEmpty().contains("offset 0"))
+	}
+
+	@Test
+	fun logicalNotIsNotConfusedWithNegatedWordOperators() {
+		assertContentEquals(
+			listOf(NOT, Key("flag"), NOT, Key("inside"), NOT_CONTAINS, NOT_INSTANCE_OF),
+			CrescentLexer.invoke("!flag !inside !in !is"),
+		)
+	}
+
+	@Test
+	fun quotedEscapesAreDecoded() {
+		assertContentEquals(
+			listOf(Data.String("line\nquote\"slash\\"), Data.Char('\n')),
+			CrescentLexer.invoke("\"line\\nquote\\\"slash\\\\\" '\\n'"),
+		)
+	}
+
+	@Test
+	fun unterminatedStringReportsItsOffset() {
+		val error = assertFailsWith<IllegalArgumentException> { CrescentLexer.invoke("val x = \"no end") }
+		assertTrue(error.message.orEmpty().contains("offset 8"))
+	}
+
+	@Test
+	fun illegalCharacterReportsItsOffset() {
+		val error = assertFailsWith<IllegalArgumentException> { CrescentLexer.invoke("val x = @") }
+		assertTrue(error.message.orEmpty().contains("'@' at offset 8"))
+	}
 
     @Test
     fun ifStatement() {
@@ -121,7 +200,7 @@ internal class CrescentLexerTests {
                 Key("println"), Parenthesis.OPEN, Data.String("\${'$'}"), Parenthesis.CLOSE,
 
                 Data.Comment("Should println dollar sign next to the letter x"),
-                Key("println"), Parenthesis.OPEN, Data.String("\\\$x"), Parenthesis.CLOSE,
+                Key("println"), Parenthesis.OPEN, Data.String("\$x"), Parenthesis.CLOSE,
 
                 Key("println"), Parenthesis.OPEN, Data.String("$ x"), Parenthesis.CLOSE,
 
@@ -247,7 +326,7 @@ internal class CrescentLexerTests {
 
                 STRUCT, Key("Example"), Parenthesis.OPEN,
                 VAL, Key("aNumber"), TYPE_PREFIX, Key("I32"), Data.Comment("New lines makes commas redundant"),
-                VAL, Key("aValue1"), Key("aValue2"), ASSIGN, Data.String(""), Data.Comment("Multi declaration of same type, can all be set to one or multiple default values"),
+                VAL, Key("aValue1"), Key("aValue2"), ASSIGN, Data.String(""), Data.Comment("Grouped fields share one default value"),
                 Parenthesis.CLOSE,
 
                 IMPL, Key("Example"), Bracket.OPEN,
@@ -383,8 +462,9 @@ internal class CrescentLexerTests {
                 Data.Number(1.toByte()), SUB, Data.Comment("Meow"),
                 Data.Number(1.toByte()), DIV, Data.Comment("Meow"),
                 Data.Number(1.toByte()), MUL, Data.Comment("Meow"),
-                Data.Number(1.toByte()), ASSIGN, Data.Comment("Meow"),
-                Data.Comment("}")
+				Data.Number(1.toByte()), ASSIGN, Data.Number(1.toByte()), Data.Comment("Meow"),
+				Data.Comment("The brace in this comment must not close the function: }"),
+				Bracket.CLOSE,
             ),
             tokens
         )
@@ -417,8 +497,6 @@ internal class CrescentLexerTests {
     fun nateTriangle() {
 
         val tokens = CrescentLexer.invoke(TestCode.nateTriangle)
-
-        println(tokens)
 
         assertContentEquals(
             listOf(
