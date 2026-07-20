@@ -7,8 +7,9 @@ platform:
   arch: amd64
 
 steps:
-
-- name: test
-  image: gradle:9.5.0-jdk21
-  commands:
-  - gradle build --no-daemon
+  - name: test
+    image: eclipse-temurin:21.0.11_10-jdk@sha256:da9d3a4f7650db39b918fc5a2c3da76556fb8cc8e5f3767cdea0bb409286951a
+    commands:
+      - echo "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7  gradle/wrapper/gradle-wrapper.jar" | sha256sum --check --strict -
+      - ./gradlew build installDist --no-daemon
+      - ./build/install/CrescentLang/bin/crescent --help

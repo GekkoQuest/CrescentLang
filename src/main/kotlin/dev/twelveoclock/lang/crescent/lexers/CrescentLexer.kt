@@ -1,248 +1,252 @@
 package dev.twelveoclock.lang.crescent.lexers
 
 import dev.twelveoclock.lang.crescent.iterator.PeekingCharIterator
+import dev.twelveoclock.lang.crescent.iterator.TokenSourceMetadata
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken
-import dev.twelveoclock.lang.crescent.project.checkEquals
 import dev.twelveoclock.lang.crescent.project.extensions.minimize
+import java.math.BigInteger
 
-// TODO: Support negative numbers
 object CrescentLexer {
 
-	// TODO: Remake to act like how my filter works, finds all matches and eliminates as it continues to read
+	private val symbolicTokens: Map<String, CrescentToken> = mapOf(
+		"!==" to CrescentToken.Operator.NOT_EQUALS_REFERENCE_COMPARE,
+		"===" to CrescentToken.Operator.EQUALS_REFERENCE_COMPARE,
+		"::" to CrescentToken.Operator.IMPORT_SEPARATOR,
+		"->" to CrescentToken.Operator.RETURN,
+		".." to CrescentToken.Operator.RANGE_TO,
+		"+=" to CrescentToken.Operator.ADD_ASSIGN,
+		"-=" to CrescentToken.Operator.SUB_ASSIGN,
+		"*=" to CrescentToken.Operator.MUL_ASSIGN,
+		"/=" to CrescentToken.Operator.DIV_ASSIGN,
+		"%=" to CrescentToken.Operator.REM_ASSIGN,
+		"^=" to CrescentToken.Operator.POW_ASSIGN,
+		"||" to CrescentToken.Operator.OR_COMPARE,
+		"&&" to CrescentToken.Operator.AND_COMPARE,
+		"<=" to CrescentToken.Operator.LESSER_EQUALS_COMPARE,
+		">=" to CrescentToken.Operator.GREATER_EQUALS_COMPARE,
+		"==" to CrescentToken.Operator.EQUALS_COMPARE,
+		"!=" to CrescentToken.Operator.NOT_EQUALS_COMPARE,
+		"(" to CrescentToken.Parenthesis.OPEN,
+		")" to CrescentToken.Parenthesis.CLOSE,
+		"{" to CrescentToken.Bracket.OPEN,
+		"}" to CrescentToken.Bracket.CLOSE,
+		"[" to CrescentToken.SquareBracket.OPEN,
+		"]" to CrescentToken.SquareBracket.CLOSE,
+		"!" to CrescentToken.Operator.NOT,
+		"+" to CrescentToken.Operator.ADD,
+		"-" to CrescentToken.Operator.SUB,
+		"*" to CrescentToken.Operator.MUL,
+		"/" to CrescentToken.Operator.DIV,
+		"%" to CrescentToken.Operator.REM,
+		"^" to CrescentToken.Operator.POW,
+		"=" to CrescentToken.Operator.ASSIGN,
+		"<" to CrescentToken.Operator.LESSER_COMPARE,
+		">" to CrescentToken.Operator.GREATER_COMPARE,
+		":" to CrescentToken.Operator.TYPE_PREFIX,
+		"?" to CrescentToken.Operator.RESULT,
+		"," to CrescentToken.Operator.COMMA,
+		"." to CrescentToken.Operator.DOT,
+	)
+	private val symbolicTokenEntries = symbolicTokens.entries.sortedByDescending { it.key.length }
+
+	private val wordTokens: Map<String, CrescentToken> = mapOf(
+		"in" to CrescentToken.Operator.CONTAINS,
+		"as" to CrescentToken.Operator.AS,
+		"is" to CrescentToken.Operator.INSTANCE_OF,
+		"shr" to CrescentToken.Operator.BIT_SHIFT_RIGHT,
+		"shl" to CrescentToken.Operator.BIT_SHIFT_LEFT,
+		"ushr" to CrescentToken.Operator.UNSIGNED_BIT_SHIFT_RIGHT,
+		"and" to CrescentToken.Operator.BIT_AND,
+		"or" to CrescentToken.Operator.BIT_OR,
+		"xor" to CrescentToken.Operator.BIT_XOR,
+		"var" to CrescentToken.Variable.VAR,
+		"val" to CrescentToken.Variable.VAL,
+		"const" to CrescentToken.Variable.CONST,
+		"struct" to CrescentToken.Type.STRUCT,
+		"impl" to CrescentToken.Type.IMPL,
+		"trait" to CrescentToken.Type.TRAIT,
+		"object" to CrescentToken.Type.OBJECT,
+		"enum" to CrescentToken.Type.ENUM,
+		"sealed" to CrescentToken.Type.SEALED,
+		"else" to CrescentToken.Statement.ELSE,
+		"import" to CrescentToken.Statement.IMPORT,
+		"if" to CrescentToken.Statement.IF,
+		"when" to CrescentToken.Statement.WHEN,
+		"while" to CrescentToken.Statement.WHILE,
+		"for" to CrescentToken.Statement.FOR,
+		"fun" to CrescentToken.Statement.FUN,
+		"async" to CrescentToken.Modifier.ASYNC,
+		"override" to CrescentToken.Modifier.OVERRIDE,
+		"operator" to CrescentToken.Modifier.OPERATOR,
+		"inline" to CrescentToken.Modifier.INLINE,
+		"static" to CrescentToken.Modifier.STATIC,
+		"infix" to CrescentToken.Modifier.INFIX,
+		"public" to CrescentToken.Visibility.PUBLIC,
+		"internal" to CrescentToken.Visibility.INTERNAL,
+		"private" to CrescentToken.Visibility.PRIVATE,
+		"break" to CrescentToken.Keyword.BREAK,
+		"continue" to CrescentToken.Keyword.CONTINUE,
+	)
+
 	fun invoke(input: String): List<CrescentToken> {
-
 		val tokens = mutableListOf<CrescentToken>()
-		val charIterator = PeekingCharIterator(input)
+		val statementBoundaries = mutableSetOf<Int>()
+		val escapedDollarOffsets = mutableMapOf<Int, Set<Int>>()
+		val iterator = PeekingCharIterator(input)
 
-		while (charIterator.hasNext()) {
-
-			// MicroOptimization to avoid toDoubleOrNull
-			var isANumber = false
-
-			// Skip to next key
-			charIterator.nextUntil {
-				!it.isWhitespace()
+		while (iterator.hasNext()) {
+			val current = iterator.peekNext()
+			val negatedWord = if (current == '!') {
+				listOf("in", "is").firstOrNull { word ->
+					word.indices.all { index -> iterator.peekNextOrNull(index + 2) == word[index] } &&
+					iterator.peekNextOrNull(word.length + 2)?.let(::isIdentifierPart) != true
+				}
+			} else {
+				null
 			}
-
-			if (!charIterator.hasNext()) {
-				break
-			}
-
-			val key = when (val peekNext = charIterator.peekNext()) {
-
-				':' -> {
-					if (charIterator.peekNext(2) == ':') {
-						"${charIterator.next()}${charIterator.next()}"
+			when {
+				current.isWhitespace() || current == ';' -> {
+					iterator.next()
+					if (current == '\n' || current == '\r' || current == ';') statementBoundaries += tokens.size
+				}
+				current == '#' -> {
+					iterator.next()
+					tokens += CrescentToken.Data.Comment(iterator.nextUntil('\n').trim())
+				}
+				current == '"' -> {
+					val quoted = readQuoted(iterator, '"')
+					val tokenIndex = tokens.size
+					tokens += CrescentToken.Data.String(quoted.value)
+					if (quoted.escapedDollarOffsets.isNotEmpty()) escapedDollarOffsets[tokenIndex] = quoted.escapedDollarOffsets
+				}
+				current == '\'' -> {
+					val offset = iterator.position
+					val value = readQuoted(iterator, '\'').value
+					require(value.length == 1) { "Character literal at offset $offset must contain exactly one character" }
+					tokens += CrescentToken.Data.Char(value.single())
+				}
+				current.isDigit() || current == '.' && iterator.peekNextOrNull(2)?.isDigit() == true -> {
+					val literal = readNumber(iterator)
+					val number: Number = if ('.' in literal) {
+						literal.toDoubleOrNull()?.takeIf { it.isFinite() }
 					} else {
-						"${charIterator.next()}"
+						literal.toBigIntegerOrNull()?.takeIf { it <= MAX_UNSIGNED_INTEGER }
+					} ?: throw IllegalArgumentException("Invalid number '$literal' at offset ${iterator.position - literal.length}")
+					tokens += CrescentToken.Data.Number(number.minimize())
+				}
+				negatedWord != null -> {
+					iterator.next(negatedWord.length + 1)
+					tokens += when (negatedWord) {
+						"in" -> CrescentToken.Operator.NOT_CONTAINS
+						"is" -> CrescentToken.Operator.NOT_INSTANCE_OF
+						else -> error("Unknown negated word operator: $negatedWord")
 					}
 				}
-
-				'!', '+', '-', '/', '%', '^', '*', '=', '<', '>' -> {
-
-					val next = charIterator.next()
-					val peek = charIterator.peekNext()
-
-					// If is negative number
-					/*
-					if (!charIterator.peekBack(2).isDigit() && next == '-' && (peek.isDigit() || (peek == '.' && charIterator.peekNext(2).isDigit()))) {
-						isANumber = true
-						"-${readNumber(charIterator)}"
-					}
-					else*/if (peek == '=' || next == '-' && peek == '>') {
-						"$next${charIterator.next()}"
-					} else {
-						"$next"
-					}
+				isIdentifierStart(current) -> {
+					val word = iterator.nextUntil { !isIdentifierPart(it) }
+					tokens.add(wordTokens[word] ?: when (word) {
+						"true" -> CrescentToken.Data.Boolean(true)
+						"false" -> CrescentToken.Data.Boolean(false)
+						else -> CrescentToken.Key(word)
+					})
 				}
-
-				// Only take in one of these at a time
-				'(', ')', '{', '}', '[', ']', '\'', '"', '#' -> {
-					charIterator.next().toString()
-				}
-
-				// Is symbol
 				else -> {
-					when {
-
-						(peekNext == '.' && charIterator.peekNext(2).isDigit()) || peekNext.isDigit() -> {
-
-							isANumber = true
-
-							// Select number, stop if rangeTo (..) is found
-							readNumber(charIterator)
-						}
-
-
-						peekNext.isLetter() -> {
-							charIterator.nextUntil { !it.isLetterOrDigit() }
-						}
-
-						else -> {
-							charIterator.nextUntil { it.isLetterOrDigit() || it.isWhitespace() }
-						}
-
+					val match = symbolicTokenEntries.firstOrNull { (symbol) ->
+						symbol.indices.all { index -> iterator.peekNextOrNull(index + 1) == symbol[index] }
 					}
-				}
-
-			}
-
-			if (isANumber) {
-
-				// TODO: Determine type of number
-
-				tokens +=
-					if ('.' in key) {
-						CrescentToken.Data.Number(key.toDouble().minimize())
+					if (match == null) {
+						throw IllegalArgumentException("Unexpected character '$current' at offset ${iterator.position}")
 					} else {
-						CrescentToken.Data.Number(key.toLong().minimize())
+						iterator.next(match.key.length)
+						tokens.add(match.value)
 					}
-
-				continue
-			}
-
-			tokens += when (key) {
-
-				// Semicolons
-				";" -> continue
-
-				// Parenthesis
-				"(" -> CrescentToken.Parenthesis.OPEN
-				")" -> CrescentToken.Parenthesis.CLOSE
-
-				// Bracket
-				"{" -> CrescentToken.Bracket.OPEN
-				"}" -> CrescentToken.Bracket.CLOSE
-
-				// Array declaration
-				"[" -> CrescentToken.SquareBracket.OPEN
-				"]" -> CrescentToken.SquareBracket.CLOSE
-
-				// Infix Operators
-				"in" -> CrescentToken.Operator.CONTAINS
-				".." -> CrescentToken.Operator.RANGE_TO
-				"as" -> CrescentToken.Operator.AS
-
-				// Variables
-				"var" -> CrescentToken.Variable.VAR
-				"val" -> CrescentToken.Variable.VAL
-				"const" -> CrescentToken.Variable.CONST
-
-				// Types
-				"struct" -> CrescentToken.Type.STRUCT
-				"impl" -> CrescentToken.Type.IMPL
-				"trait" -> CrescentToken.Type.TRAIT
-				"object" -> CrescentToken.Type.OBJECT
-				"enum" -> CrescentToken.Type.ENUM
-				"sealed" -> CrescentToken.Type.SEALED
-
-				// Statements
-				"else" -> CrescentToken.Statement.ELSE
-				"import" -> CrescentToken.Statement.IMPORT
-				"if" -> CrescentToken.Statement.IF
-				"when" -> CrescentToken.Statement.WHEN
-				"while" -> CrescentToken.Statement.WHILE
-				"for" -> CrescentToken.Statement.FOR
-				"fun" -> CrescentToken.Statement.FUN
-
-				// Modifiers
-				"async" -> CrescentToken.Modifier.ASYNC
-				"override" -> CrescentToken.Modifier.OVERRIDE
-				"operator" -> CrescentToken.Modifier.OPERATOR
-				"inline" -> CrescentToken.Modifier.INLINE
-				"static" -> CrescentToken.Modifier.STATIC
-
-				// Visibility
-				"public" -> CrescentToken.Visibility.PUBLIC
-				"internal" -> CrescentToken.Visibility.INTERNAL
-				"private" -> CrescentToken.Visibility.PRIVATE
-
-				// Arithmetic
-				"!" -> CrescentToken.Operator.NOT
-				"+" -> CrescentToken.Operator.ADD
-				"-" -> CrescentToken.Operator.SUB
-				"*" -> CrescentToken.Operator.MUL
-				"/" -> CrescentToken.Operator.DIV
-				"%" -> CrescentToken.Operator.REM
-				"^" -> CrescentToken.Operator.POW
-
-				// Bit
-				"shr" -> CrescentToken.Operator.BIT_SHIFT_RIGHT
-				"shl" -> CrescentToken.Operator.BIT_SHIFT_LEFT
-				"ushr" -> CrescentToken.Operator.UNSIGNED_BIT_SHIFT_RIGHT
-				"and" -> CrescentToken.Operator.BIT_AND
-				"or" -> CrescentToken.Operator.BIT_OR
-				"xor" -> CrescentToken.Operator.BIT_XOR
-
-				// Assign
-				"=" -> CrescentToken.Operator.ASSIGN
-				"+=" -> CrescentToken.Operator.ADD_ASSIGN
-				"-=" -> CrescentToken.Operator.SUB_ASSIGN
-				"*=" -> CrescentToken.Operator.MUL_ASSIGN
-				"/=" -> CrescentToken.Operator.DIV_ASSIGN
-				"%=" -> CrescentToken.Operator.REM_ASSIGN
-				"^=" -> CrescentToken.Operator.POW_ASSIGN
-
-				// Compare
-				"||" -> CrescentToken.Operator.OR_COMPARE
-				"&&" -> CrescentToken.Operator.AND_COMPARE
-				"<" -> CrescentToken.Operator.LESSER_COMPARE
-				">" -> CrescentToken.Operator.GREATER_COMPARE
-				"<=" -> CrescentToken.Operator.LESSER_EQUALS_COMPARE
-				">=" -> CrescentToken.Operator.GREATER_EQUALS_COMPARE
-				"==" -> CrescentToken.Operator.EQUALS_COMPARE
-				"!=" -> CrescentToken.Operator.NOT_EQUALS_COMPARE
-
-				// Compare references
-				"===" -> CrescentToken.Operator.EQUALS_REFERENCE_COMPARE
-				"!==" -> CrescentToken.Operator.NOT_EQUALS_REFERENCE_COMPARE
-
-				// Type prefix
-				":" -> CrescentToken.Operator.TYPE_PREFIX
-
-				// String
-				// TODO: Add support for ${} - No this will be done in the parser
-				"\"" -> CrescentToken.Data.String(charIterator.nextUntilAndSkip('"'))
-				"'" -> {
-					val data = charIterator.nextUntilAndSkip('\'')
-					checkEquals(1, data.length)
-					CrescentToken.Data.Char(data[0])
 				}
-
-				// Comment
-				"#" -> CrescentToken.Data.Comment(charIterator.nextUntil('\n').trim())
-
-				// Keywords
-				"break" -> CrescentToken.Keyword.BREAK
-				"continue" -> CrescentToken.Keyword.CONTINUE
-
-
-				//"\n" -> CrescentToken.Operator.NEW_LINE
-				"is" -> CrescentToken.Operator.INSTANCE_OF
-				"->" -> CrescentToken.Operator.RETURN
-				"?" -> CrescentToken.Operator.RESULT
-				"," -> CrescentToken.Operator.COMMA
-				"." -> CrescentToken.Operator.DOT
-				"::" -> CrescentToken.Operator.IMPORT_SEPARATOR
-
-				"true" -> CrescentToken.Data.Boolean(true)
-				"false" -> CrescentToken.Data.Boolean(false)
-
-				else -> CrescentToken.Key(key)
 			}
 		}
 
-		return tokens
+		return LexedTokens(tokens.toList(), statementBoundaries.toSet(), escapedDollarOffsets.toMap())
 	}
 
 	fun readNumber(charIterator: PeekingCharIterator): String {
-		return charIterator.nextUntil {
-			if (it == '.' && charIterator.peekNext(2) != '.') {
-				false
-			} else {
-				!it.isDigit()
+		val start = charIterator.position
+		var sawDecimal = false
+		while (charIterator.hasNext()) {
+			when {
+				charIterator.peekNext().isDigit() -> charIterator.next()
+				charIterator.peekNext() == '.' && !sawDecimal && charIterator.peekNextOrNull(2) != '.' -> {
+					sawDecimal = true
+					charIterator.next()
+				}
+				else -> break
 			}
 		}
+		return charIterator.input.substring(start, charIterator.position)
 	}
 
+	private data class QuotedValue(val value: String, val escapedDollarOffsets: Set<Int> = emptySet())
+
+	private data class LexedTokens(
+		private val tokens: List<CrescentToken>,
+		override val statementBoundaries: Set<Int>,
+		override val escapedDollarOffsets: Map<Int, Set<Int>>,
+	) : AbstractList<CrescentToken>(), TokenSourceMetadata {
+		override val size: Int get() = tokens.size
+		override fun get(index: Int): CrescentToken = tokens[index]
+	}
+
+	private fun readQuoted(iterator: PeekingCharIterator, quote: Char): QuotedValue {
+		val start = iterator.position
+		iterator.next()
+
+		if (quote == '"' && iterator.peekNextOrNull() == '"' && iterator.peekNextOrNull(2) == '"') {
+			iterator.next(2)
+			val result = StringBuilder()
+			while (iterator.hasNext()) {
+				if (iterator.peekNext() == '"' && iterator.peekNextOrNull(2) == '"' && iterator.peekNextOrNull(3) == '"') {
+					iterator.next(3)
+					return QuotedValue(result.toString())
+				}
+				result.append(iterator.next())
+			}
+			throw IllegalArgumentException("Unterminated string literal at offset $start")
+		}
+
+		val result = StringBuilder()
+		val escapedDollarOffsets = mutableSetOf<Int>()
+		while (iterator.hasNext()) {
+			val next = iterator.next()
+			if (next == quote) return QuotedValue(result.toString(), escapedDollarOffsets)
+			if (next != '\\') {
+				result.append(next)
+				continue
+			}
+
+			val escaped = iterator.peekNextOrNull()
+				?: throw IllegalArgumentException("Unterminated escape sequence at offset ${iterator.position - 1}")
+			iterator.next()
+			result.append(
+				when (escaped) {
+					'n' -> '\n'
+					'r' -> '\r'
+					't' -> '\t'
+					'0' -> '\u0000'
+					'\\' -> '\\'
+					'"' -> '"'
+					'\'' -> '\''
+					'$' -> {
+						if (quote == '"') escapedDollarOffsets += result.length
+						'$'
+					}
+					else -> throw IllegalArgumentException("Unknown escape sequence '\\$escaped' at offset ${iterator.position - 2}")
+				}
+			)
+		}
+
+		throw IllegalArgumentException("Unterminated ${if (quote == '"') "string" else "character"} literal at offset $start")
+	}
+
+	private fun isIdentifierStart(char: Char): Boolean = char == '_' || char.isLetter()
+	private fun isIdentifierPart(char: Char): Boolean = char == '_' || char.isLetterOrDigit()
+
+	private val MAX_UNSIGNED_INTEGER = BigInteger("18446744073709551615")
 }

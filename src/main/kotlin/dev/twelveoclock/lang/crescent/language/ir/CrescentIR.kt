@@ -1,15 +1,28 @@
 package dev.twelveoclock.lang.crescent.language.ir
 
-// TODO: Keep track of function positions
-// TODO: Add line numbers
+import java.util.Collections
 
-
+/**
+ * Named section view of serialized legacy IR. The legacy format has no source
+ * locations, so execution diagnostics identify a function and command index.
+ */
 @JvmInline
 value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<CrescentIR.Command>>>) {
 
 	companion object {
 
 		fun from(crescentIR: CrescentIR): SectionedCrescentIR {
+			val programCommands = crescentIR.commands.filterIsInstance<CrescentIR.Command.Program>()
+			if (programCommands.isNotEmpty()) {
+				require(crescentIR.commands.size == 1) {
+					"A lowered Program command cannot be mixed with legacy serialized stack IR commands"
+				}
+				val program = programCommands.single()
+				// CrescentProgramIR validates source uniqueness, deterministic ordering,
+				// and that the exact main FunctionRef is declared by one source unit.
+				program.program
+				return SectionedCrescentIR(emptyMap())
+			}
 
 			var lastSection: Section? = null
 			var lastName: String? = null
@@ -19,7 +32,11 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 			fun flushSection() {
 				val section = lastSection ?: return
 				val name = requireNotNull(lastName)
-				sections.getOrPut(section) { mutableMapOf() }[name] = sectionCommands
+				val namedSections = sections.getOrPut(section) { mutableMapOf() }
+				require(name !in namedSections) {
+					"Duplicate ${section.name.lowercase()} section '$name'"
+				}
+				namedSections[name] = sectionCommands.toList()
 				sectionCommands = mutableListOf()
 			}
 
@@ -27,6 +44,7 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 				when (it) {
 
 					is CrescentIR.Command.Fun -> {
+						require(it.name.isNotBlank()) { "Function section names cannot be blank" }
 
 						flushSection()
 
@@ -35,6 +53,7 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 					}
 
 					is CrescentIR.Command.Struct -> {
+						require(it.name.isNotBlank()) { "Struct section names cannot be blank" }
 
 						flushSection()
 
@@ -43,6 +62,9 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 					}
 
 					else -> {
+						require(lastSection != null) {
+							"Legacy IR command '$it' appears before a function or struct section"
+						}
 						sectionCommands.add(it)
 					}
 				}
@@ -50,7 +72,12 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 
 			flushSection()
 
-			return SectionedCrescentIR(sections)
+			val frozen = sections.entries.associate { (section, namedSections) ->
+				section to Collections.unmodifiableMap(namedSections.entries.associate { (name, commands) ->
+					name to Collections.unmodifiableList(commands.toList())
+				})
+			}
+			return SectionedCrescentIR(Collections.unmodifiableMap(frozen))
 		}
 
 	}
@@ -65,39 +92,15 @@ value class SectionedCrescentIR(val sections: Map<Section, Map<String, List<Cres
 @JvmInline
 value class CrescentIR(val commands: List<Command>) {
 
-	// Function name -> Position
-	/*
-	val functions = commands.mapIndexedNotNull { index, command ->
-		val function = command as? Command.Fun ?: return@mapIndexedNotNull null
-		function.name to index
-	}.toMap()
-	*/
-
 	sealed interface Command {
 
 		/**
-		 * A linked, typed Crescent program. This is the canonical high-level IR command;
-		 * the lower-level stack commands remain supported for serialized legacy IR.
+		 * A linked, AST-free lowered Crescent program. Stack commands remain supported
+		 * solely as the serialized legacy IR format.
 		 */
 		data class Program(
-			val files: List<dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node.File>,
-			val mainFile: dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node.File,
+			val program: CrescentProgramIR,
 		) : Command
-
-		// These aren't needed, in fact loops aren't needed in the IR, just if statements and jumps
-		/*
-		object Continue : Command {
-			override fun toString(): String {
-				return "continue"
-			}
-		}
-
-		object Break : Command {
-			override fun toString(): String {
-				return "break"
-			}
-		}
-		*/
 
 		object AddAssign : Command {
 			override fun toString(): String {
@@ -220,7 +223,7 @@ value class CrescentIR(val commands: List<Command>) {
 			}
 		}
 
-		// Value got by popping last value
+		/** Pops a variable name, then its new value, from the legacy stack. */
 		object Assign : Command {
 			override fun toString(): String {
 				return "assign"
@@ -246,14 +249,33 @@ value class CrescentIR(val commands: List<Command>) {
 			}
 		}
 
-		// Should also be used on return
-		// TODO: Take in a list of values
+		/**
+		 * Pushes a legacy literal. Serialization supports strings, characters,
+		 * booleans, signed JVM integer types, and finite [Float]/[Double] values.
+		 * Numeric wrapper types are canonicalized to the smallest lossless type by
+		 * the parser; unsupported values fail explicitly when serialized.
+		 */
 		@JvmInline
 		value class Push(
 			val value: Any,
 		) : Command {
 			override fun toString(): String {
-				return "push $value"
+				val literal = when (value) {
+					is String -> "\"${value.toLegacyEscaped()}\""
+					is Char -> "'${value.toString().toLegacyEscaped(escapeSingleQuote = true)}'"
+					is Boolean,
+					is Byte,
+					is Short,
+					is Int,
+					is Long,
+					-> value.toString()
+					is Float -> value.takeIf(Float::isFinite)?.toString()
+					is Double -> value.takeIf(Double::isFinite)?.toString()
+					else -> null
+				} ?: throw IllegalArgumentException(
+					"Legacy Push cannot serialize a value of type ${value::class.qualifiedName}",
+				)
+				return "push $literal"
 			}
 		}
 
@@ -293,7 +315,7 @@ value class CrescentIR(val commands: List<Command>) {
 			}
 		}
 
-		// Maybe take libraries in the constructor for CrescentIR
+		/** Retained for serialized compatibility; the legacy VM reports it as unsupported. */
 		@JvmInline
 		value class LoadLibrary(
 			val name: String,
@@ -303,7 +325,7 @@ value class CrescentIR(val commands: List<Command>) {
 			}
 		}
 
-		// Gets args from previously pushed values
+		/** Invokes a builtin or named function using the shared legacy stack. */
 		@JvmInline
 		value class Invoke(
 			val name: String,
@@ -313,7 +335,7 @@ value class CrescentIR(val commands: List<Command>) {
 			}
 		}
 
-		// Uses pushed values to create an instance
+		/** Retained for serialized compatibility; the legacy VM reports it as unsupported. */
 		@JvmInline
 		value class CreateInstance(
 			val structName: String,
@@ -327,8 +349,22 @@ value class CrescentIR(val commands: List<Command>) {
 
 }
 
-/*
-	fun main
-	push "Hello World"
-	invoke "println"
-*/
+private fun String.toLegacyEscaped(escapeSingleQuote: Boolean = false): String = buildString(length) {
+	for (character in this@toLegacyEscaped) {
+		when (character) {
+			'\\' -> append("\\\\")
+			'"' -> append("\\\"")
+			'\'' -> if (escapeSingleQuote) append("\\'") else append(character)
+			'\n' -> append("\\n")
+			'\r' -> append("\\r")
+			'\t' -> append("\\t")
+			'\b' -> append("\\b")
+			else -> if (character.code in 0x00..0x1f || character.code in 0x7f..0x9f) {
+				append("\\u")
+				append(character.code.toString(16).padStart(4, '0'))
+			} else {
+				append(character)
+			}
+		}
+	}
+}

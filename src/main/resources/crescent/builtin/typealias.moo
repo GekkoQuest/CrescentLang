@@ -1,1 +1,0 @@
-type Thing = String

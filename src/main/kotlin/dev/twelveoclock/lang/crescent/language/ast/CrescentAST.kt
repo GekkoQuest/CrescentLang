@@ -1,15 +1,11 @@
 package dev.twelveoclock.lang.crescent.language.ast
 
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken
-//import tech.poder.ir.api.CodeHolder
+import java.math.BigInteger
 import java.nio.file.Path
 import kotlin.math.pow
 
-
-// https://github.com/cretz/kastree/blob/master/ast/ast-common/src/main/kotlin/kastree/ast/Node.kt
-
-// TODO: Store line numbers and start/end char positions
-// TODO: Make Variable a sealed class, Basic, Constant, Local
+// AST shapes remain source-compatible and therefore do not yet carry source spans.
 class CrescentAST {
 
 	interface Node {
@@ -43,6 +39,17 @@ class CrescentAST {
 
 		}
 
+		/** A source type used by `as`, `is`, or `!is`; never a runtime value lookup. */
+		@JvmInline
+		value class TypeLiteral(val type: Type) : Node
+
+		/** A source-level infix method invocation: `receiver functionName argument`. */
+		data class InfixCall(
+			val receiver: Node,
+			val functionName: String,
+			val argument: Node,
+		) : Node
+
 		// Should usually only represent stuff inside (,)'s or return values
 		@JvmInline
 		value class Expression(
@@ -66,19 +73,6 @@ class CrescentAST {
 
 		}
 
-		/*
-		@JvmInline
-		value class InstanceOf(
-			val expression: Node,
-		) : Node {
-
-			override fun toString(): String {
-				return "is $expression"
-			}
-
-		}
-		*/
-
 		@JvmInline
 		value class Return(
 			val expression: Node,
@@ -99,12 +93,14 @@ class CrescentAST {
 		data class Struct(
 			val name: String,
 			val variables: List<Variable.Basic>,
+			val visibility: CrescentToken.Visibility = CrescentToken.Visibility.PUBLIC,
 		) : Node
 
 		data class Sealed(
 			val name: String,
 			val structs: List<Struct>,
-			val objects: List<Object>
+			val objects: List<Object>,
+			val visibility: CrescentToken.Visibility = CrescentToken.Visibility.PUBLIC,
 		) : Node, Typed {
 
 			override val type = Type.Basic(name)
@@ -114,18 +110,19 @@ class CrescentAST {
 		data class Trait(
 			val name: String,
 			val functionTraits: List<FunctionTrait>,
+			val visibility: CrescentToken.Visibility = CrescentToken.Visibility.PUBLIC,
 		) : Node, Typed {
 
 			override val type = Type.Basic(name)
 
 		}
 
-		// TODO: Force variables to be val not var
 		data class Object(
 			val name: String,
 			val variables: Map<String, Variable.Basic>,
 			val constants: Map<String, Variable.Constant>,
 			val functions: Map<String, Function>,
+			val visibility: CrescentToken.Visibility = CrescentToken.Visibility.PUBLIC,
 		) : Node, Typed {
 
 			override val type = Type.Basic(name)
@@ -143,6 +140,7 @@ class CrescentAST {
 			val name: String,
 			val parameters: List<Parameter>,
 			val structs: List<EnumEntry>,
+			val visibility: CrescentToken.Visibility = CrescentToken.Visibility.PUBLIC,
 		) : Node, Typed {
 
 			override val type = Type.Basic(name)
@@ -209,7 +207,7 @@ class CrescentAST {
 				override val isFinal = true
 
 				override fun toString(): String {
-					return "const $name: ${type::class.simpleName} = $value"
+					return "const $name: $type = $value"
 				}
 
 			}
@@ -238,7 +236,26 @@ class CrescentAST {
 			val innerCode: Statement.Block,
 		) : Node
 
-		// TODO: Make a better toString
+		enum class ModuleSymbolKind {
+			FUNCTION,
+			VARIABLE,
+			CONSTANT,
+			STRUCT,
+			SEALED,
+			TRAIT,
+			OBJECT,
+			ENUM,
+		}
+
+		data class ModuleSymbol(
+			val packageId: String,
+			val declarationPath: Path,
+			val sourceName: String,
+			val kind: ModuleSymbolKind,
+			val visibility: CrescentToken.Visibility,
+			val enclosingTypeName: String? = null,
+		)
+
 		data class File(
 			val path: Path,
 			val imports: List<Import>,
@@ -253,7 +270,9 @@ class CrescentAST {
 			val constants: Map<String, Variable.Constant>,
 			val functions: Map<String, Function>,
 			val mainFunction: Function?,
-		) : Node//, CodeHolder
+			val packageId: String = "",
+			val importedSymbols: Map<String, ModuleSymbol> = emptyMap(),
+		) : Node
 
 
 		sealed class Parameter : Node {
@@ -266,7 +285,6 @@ class CrescentAST {
 				override val type: Type,
 			) : Parameter(), Typed
 
-			// TODO: Maybe have an implicit type from the expression
 			data class WithDefault(
 				override val name: String,
 				override val type: Type,
@@ -275,8 +293,6 @@ class CrescentAST {
 
 		}
 
-		// TODO: Add toStrings
-		// TODO: Implement objects for primitive types
 		interface Type : Node {
 
 			// Should only be used for variables
@@ -314,19 +330,6 @@ class CrescentAST {
 
 			}
 
-			/*
-			data class Generic(
-				val type: Basic,
-				val parameters: List<Type>,
-			) : Type() {
-
-				override fun toString(): kotlin.String {
-					return ""
-				}
-
-			}
-			*/
-
 		}
 
 
@@ -335,6 +338,7 @@ class CrescentAST {
 			data class When(
 				val argument: Node,
 				val predicateToBlock: List<Clause>,
+				val subjectName: String? = null,
 			) : Statement {
 
 				override fun toString(): String {
@@ -363,7 +367,6 @@ class CrescentAST {
 
 			}
 
-			// TODO: Add else if's, perhaps rename elseBlock to elseBlocks
 			data class If(
 				val predicate: Node,
 				val block: Block,
@@ -381,7 +384,6 @@ class CrescentAST {
 				val block: Block,
 			) : Statement
 
-			// TODO: Make it a list of nodes
 			@JvmInline
 			value class Block(
 				val nodes: List<Node>,
@@ -406,28 +408,15 @@ class CrescentAST {
 
 		}
 
-		@JvmInline
-		value class Array(
-			//override val type: Type.Array,
-			val values: kotlin.Array<Node>,
-		) : Node/*, Typed*/ {
+		class Array(
+			values: kotlin.Array<Node>,
+		) : Node {
+			val values: List<Node> = java.util.Collections.unmodifiableList(values.toList())
 
-			/*
-			override fun equals(other: Any?): Boolean {
-				if (this === other) return true
-				if (javaClass != other?.javaClass) return false
+			override fun equals(other: Any?): kotlin.Boolean =
+				this === other || other is Array && values == other.values
 
-				other as Array
-
-				if (!values.contentEquals(other.values)) return false
-
-				return true
-			}
-
-			override fun hashCode(): Int {
-				return values.contentHashCode()
-			}
-			*/
+			override fun hashCode(): Int = values.hashCode()
 
 		}
 
@@ -805,455 +794,103 @@ class CrescentAST {
 					return F64(toF64().data.pow(number.toF64().data))
 				}
 
-				operator fun minus(number: Number): Number = when (this) {
+				operator fun minus(number: Number): Number = binaryOperation(
+					number,
+					operation = "subtract",
+					unsigned = { left, right -> left - right },
+					signed = { left, right -> left - right },
+					float = { left, right -> left - right },
+					double = { left, right -> left - right },
+				)
 
-					is U8 -> when (number) {
-						is U8 -> U32(this.data - number.data)
-						is U16 -> U32(this.data - number.data)
-						is U32 -> U32(this.data - number.data)
-						is U64 -> U64(this.data - number.data)
-						else -> error("Can't subtract an unsigned to a signed")
-					}
-					is U16 -> when (number) {
-						is U8 -> U32(this.data - number.data)
-						is U16 -> U32(this.data - number.data)
-						is U32 -> U32(this.data - number.data)
-						is U64 -> U64(this.data - number.data)
-						else -> error("Can't subtract an unsigned to a signed")
-					}
-					is U32 -> when (number) {
-						is U8 -> U32(this.data - number.data)
-						is U16 -> U32(this.data - number.data)
-						is U32 -> U32(this.data - number.data)
-						is U64 -> U64(this.data - number.data)
-						else -> error("Can't subtract an unsigned to a signed")
-					}
-					is U64 -> when (number) {
-						is U8 -> U64(this.data - number.data)
-						is U16 -> U64(this.data - number.data)
-						is U32 -> U64(this.data - number.data)
-						is U64 -> U64(this.data - number.data)
-						else -> error("Can't subtract an unsigned to a signed")
-					}
+				operator fun plus(number: Number): Number = binaryOperation(
+					number,
+					operation = "add",
+					unsigned = { left, right -> left + right },
+					signed = { left, right -> left + right },
+					float = { left, right -> left + right },
+					double = { left, right -> left + right },
+				)
 
-					is I8 -> when (number) {
-						is I8 -> I32(this.data - number.data)
-						is I16 -> I32(this.data - number.data)
-						is I32 -> I32(this.data - number.data)
-						is I64 -> I64(this.data - number.data)
-						is F32 -> F32(this.data - number.data)
-						is F64 -> F64(this.data - number.data)
-						else -> error("Can't subtract an signed to a unsigned")
-					}
-					is I16 -> when (number) {
-						is I8 -> I32(this.data - number.data)
-						is I16 -> I32(this.data - number.data)
-						is I32 -> I32(this.data - number.data)
-						is I64 -> I64(this.data - number.data)
-						is F32 -> F32(this.data - number.data)
-						is F64 -> F64(this.data - number.data)
-						else -> error("Can't subtract an signed to a unsigned")
-					}
-					is I32 -> when (number) {
-						is I8 -> I32(this.data - number.data)
-						is I16 -> I32(this.data - number.data)
-						is I32 -> I32(this.data - number.data)
-						is I64 -> I64(this.data - number.data)
-						is F32 -> F32(this.data - number.data)
-						is F64 -> F64(this.data - number.data)
-						else -> error("Can't subtract an signed to a unsigned")
-					}
-					is I64 -> when (number) {
-						is I8 -> I64(this.data - number.data)
-						is I16 -> I64(this.data - number.data)
-						is I32 -> I64(this.data - number.data)
-						is I64 -> I64(this.data - number.data)
-						is F32 -> F32(this.data - number.data)
-						is F64 -> F64(this.data - number.data)
-						else -> error("Can't subtract an signed to a unsigned")
-					}
-					is F32 -> when (number) {
-						is I8 -> F32(this.data - number.data)
-						is I16 -> F32(this.data - number.data)
-						is I32 -> F32(this.data - number.data)
-						is I64 -> F32(this.data - number.data)
-						is F32 -> F32(this.data - number.data)
-						is F64 -> F64(this.data - number.data)
-						else -> error("Can't subtract an signed to a unsigned")
-					}
-					is F64 -> when (number) {
-						is I8 -> F64(this.data - number.data)
-						is I16 -> F64(this.data - number.data)
-						is I32 -> F64(this.data - number.data)
-						is I64 -> F64(this.data - number.data)
-						is F32 -> F64(this.data - number.data)
-						is F64 -> F64(this.data - number.data)
-						else -> error("Can't subtract an signed to a unsigned")
+				operator fun div(number: Number): Number = binaryOperation(
+					number,
+					operation = "divide",
+					unsigned = { left, right -> left / right },
+					signed = { left, right -> left / right },
+					float = { left, right -> left / right },
+					double = { left, right -> left / right },
+				)
+
+				fun multiply(number: Number): Number = binaryOperation(
+					number,
+					operation = "multiply",
+					unsigned = { left, right -> left * right },
+					signed = { left, right -> left * right },
+					float = { left, right -> left * right },
+					double = { left, right -> left * right },
+				)
+
+				operator fun rem(number: Number): Number = binaryOperation(
+					number,
+					operation = "take the remainder of",
+					unsigned = { left, right -> left % right },
+					signed = { left, right -> left % right },
+					float = { left, right -> left % right },
+					double = { left, right -> left % right },
+				)
+
+				private fun binaryOperation(
+					number: Number,
+					operation: kotlin.String,
+					unsigned: (ULong, ULong) -> ULong,
+					signed: (Long, Long) -> Long,
+					float: (Float, Float) -> Float,
+					double: (Double, Double) -> Double,
+				): Number {
+					val leftUnsigned = isUnsigned()
+					val rightUnsigned = number.isUnsigned()
+					if (leftUnsigned != rightUnsigned) {
+						val combination = if (leftUnsigned) "an unsigned and a signed number" else "a signed and an unsigned number"
+						error("Can't $operation $combination")
 					}
 
-					else -> error("Unknown type: $this")
+					if (leftUnsigned) {
+						val result = unsigned(unsignedLong(), number.unsignedLong())
+						return if (this is U64 || number is U64) U64(result) else U32(result.toUInt())
+					}
+
+					return when {
+						this is F64 || number is F64 -> F64(double(toF64().data, number.toF64().data))
+						this is F32 || number is F32 -> F32(float(toF32().data, number.toF32().data))
+						this is I64 || number is I64 -> I64(signed(toI64().data, number.toI64().data))
+						else -> I32(signed(toI64().data, number.toI64().data).toInt())
+					}
 				}
 
-				operator fun plus(number: Number): Number = when (this) {
+				private fun isUnsigned(): kotlin.Boolean =
+					this is U8 || this is U16 || this is U32 || this is U64
 
-					is U8 -> when (number) {
-						is U8 -> U32(this.data + number.data)
-						is U16 -> U32(this.data + number.data)
-						is U32 -> U32(this.data + number.data)
-						is U64 -> U64(this.data + number.data)
-						else -> error("Can't add an unsigned to a signed")
-					}
-					is U16 -> when (number) {
-						is U8 -> U32(this.data + number.data)
-						is U16 -> U32(this.data + number.data)
-						is U32 -> U32(this.data + number.data)
-						is U64 -> U64(this.data + number.data)
-						else -> error("Can't add an unsigned to a signed")
-					}
-					is U32 -> when (number) {
-						is U8 -> U32(this.data + number.data)
-						is U16 -> U32(this.data + number.data)
-						is U32 -> U32(this.data + number.data)
-						is U64 -> U64(this.data + number.data)
-						else -> error("Can't add an unsigned to a signed")
-					}
-					is U64 -> when (number) {
-						is U8 -> U64(this.data + number.data)
-						is U16 -> U64(this.data + number.data)
-						is U32 -> U64(this.data + number.data)
-						is U64 -> U64(this.data + number.data)
-						else -> error("Can't add an unsigned to a signed")
-					}
-
-					is I8 -> when (number) {
-						is I8 -> I32(this.data + number.data)
-						is I16 -> I32(this.data + number.data)
-						is I32 -> I32(this.data + number.data)
-						is I64 -> I64(this.data + number.data)
-						is F32 -> F32(this.data + number.data)
-						is F64 -> F64(this.data + number.data)
-						else -> error("Can't add an signed to a unsigned")
-					}
-					is I16 -> when (number) {
-						is I8 -> I32(this.data + number.data)
-						is I16 -> I32(this.data + number.data)
-						is I32 -> I32(this.data + number.data)
-						is I64 -> I64(this.data + number.data)
-						is F32 -> F32(this.data + number.data)
-						is F64 -> F64(this.data + number.data)
-						else -> error("Can't add an signed to a unsigned")
-					}
-					is I32 -> when (number) {
-						is I8 -> I32(this.data + number.data)
-						is I16 -> I32(this.data + number.data)
-						is I32 -> I32(this.data + number.data)
-						is I64 -> I64(this.data + number.data)
-						is F32 -> F32(this.data + number.data)
-						is F64 -> F64(this.data + number.data)
-						else -> error("Can't add an signed to a unsigned")
-					}
-					is I64 -> when (number) {
-						is I8 -> I64(this.data + number.data)
-						is I16 -> I64(this.data + number.data)
-						is I32 -> I64(this.data + number.data)
-						is I64 -> I64(this.data + number.data)
-						is F32 -> F32(this.data + number.data)
-						is F64 -> F64(this.data + number.data)
-						else -> error("Can't add an signed to a unsigned")
-					}
-					is F32 -> when (number) {
-						is I8 -> F32(this.data + number.data)
-						is I16 -> F32(this.data + number.data)
-						is I32 -> F32(this.data + number.data)
-						is I64 -> F32(this.data + number.data)
-						is F32 -> F32(this.data + number.data)
-						is F64 -> F64(this.data + number.data)
-						else -> error("Can't add an signed to a unsigned")
-					}
-					is F64 -> when (number) {
-						is I8 -> F64(this.data + number.data)
-						is I16 -> F64(this.data + number.data)
-						is I32 -> F64(this.data + number.data)
-						is I64 -> F64(this.data + number.data)
-						is F32 -> F64(this.data + number.data)
-						is F64 -> F64(this.data + number.data)
-						else -> error("Can't add an signed to a unsigned")
-					}
-
-					else -> error("Unknown type: $this")
+				private fun unsignedLong(): ULong = when (this) {
+					is U8 -> data.toULong()
+					is U16 -> data.toULong()
+					is U32 -> data.toULong()
+					is U64 -> data
+					else -> error("$type is not unsigned")
 				}
-
-				operator fun div(number: Number): Number = when (this) {
-
-					is U8 -> when (number) {
-						is U8 -> U32(this.data / number.data)
-						is U16 -> U32(this.data / number.data)
-						is U32 -> U32(this.data / number.data)
-						is U64 -> U64(this.data / number.data)
-						else -> error("Can't divide an unsigned to a signed")
-					}
-					is U16 -> when (number) {
-						is U8 -> U32(this.data / number.data)
-						is U16 -> U32(this.data / number.data)
-						is U32 -> U32(this.data / number.data)
-						is U64 -> U64(this.data / number.data)
-						else -> error("Can't divide an unsigned to a signed")
-					}
-					is U32 -> when (number) {
-						is U8 -> U32(this.data / number.data)
-						is U16 -> U32(this.data / number.data)
-						is U32 -> U32(this.data / number.data)
-						is U64 -> U64(this.data / number.data)
-						else -> error("Can't divide an unsigned to a signed")
-					}
-					is U64 -> when (number) {
-						is U8 -> U64(this.data / number.data)
-						is U16 -> U64(this.data / number.data)
-						is U32 -> U64(this.data / number.data)
-						is U64 -> U64(this.data / number.data)
-						else -> error("Can't divide an unsigned to a signed")
-					}
-
-					is I8 -> when (number) {
-						is I8 -> I32(this.data / number.data)
-						is I16 -> I32(this.data / number.data)
-						is I32 -> I32(this.data / number.data)
-						is I64 -> I64(this.data / number.data)
-						is F32 -> F32(this.data / number.data)
-						is F64 -> F64(this.data / number.data)
-						else -> error("Can't divide an signed to a unsigned")
-					}
-					is I16 -> when (number) {
-						is I8 -> I32(this.data / number.data)
-						is I16 -> I32(this.data / number.data)
-						is I32 -> I32(this.data / number.data)
-						is I64 -> I64(this.data / number.data)
-						is F32 -> F32(this.data / number.data)
-						is F64 -> F64(this.data / number.data)
-						else -> error("Can't divide an signed to a unsigned")
-					}
-					is I32 -> when (number) {
-						is I8 -> I32(this.data / number.data)
-						is I16 -> I32(this.data / number.data)
-						is I32 -> I32(this.data / number.data)
-						is I64 -> I64(this.data / number.data)
-						is F32 -> F32(this.data / number.data)
-						is F64 -> F64(this.data / number.data)
-						else -> error("Can't divide an signed to a unsigned")
-					}
-					is I64 -> when (number) {
-						is I8 -> I64(this.data / number.data)
-						is I16 -> I64(this.data / number.data)
-						is I32 -> I64(this.data / number.data)
-						is I64 -> I64(this.data / number.data)
-						is F32 -> F32(this.data / number.data)
-						is F64 -> F64(this.data / number.data)
-						else -> error("Can't divide an signed to a unsigned")
-					}
-					is F32 -> when (number) {
-						is I8 -> F32(this.data / number.data)
-						is I16 -> F32(this.data / number.data)
-						is I32 -> F32(this.data / number.data)
-						is I64 -> F32(this.data / number.data)
-						is F32 -> F32(this.data / number.data)
-						is F64 -> F64(this.data / number.data)
-						else -> error("Can't divide an signed to a unsigned")
-					}
-					is F64 -> when (number) {
-						is I8 -> F64(this.data / number.data)
-						is I16 -> F64(this.data / number.data)
-						is I32 -> F64(this.data / number.data)
-						is I64 -> F64(this.data / number.data)
-						is F32 -> F64(this.data / number.data)
-						is F64 -> F64(this.data / number.data)
-						else -> error("Can't divide an signed to a unsigned")
-					}
-
-					else -> error("Unknown type: $this")
-				}
-
-				fun multiply(number: Number): Number = when (this) {
-
-					is U8 -> when (number) {
-						is U8 -> U32(this.data * number.data)
-						is U16 -> U32(this.data * number.data)
-						is U32 -> U32(this.data * number.data)
-						is U64 -> U64(this.data * number.data)
-						else -> error("Can't multiply an unsigned to a signed")
-					}
-					is U16 -> when (number) {
-						is U8 -> U32(this.data * number.data)
-						is U16 -> U32(this.data * number.data)
-						is U32 -> U32(this.data * number.data)
-						is U64 -> U64(this.data * number.data)
-						else -> error("Can't multiply an unsigned to a signed")
-					}
-					is U32 -> when (number) {
-						is U8 -> U32(this.data * number.data)
-						is U16 -> U32(this.data * number.data)
-						is U32 -> U32(this.data * number.data)
-						is U64 -> U64(this.data * number.data)
-						else -> error("Can't multiply an unsigned to a signed")
-					}
-					is U64 -> when (number) {
-						is U8 -> U64(this.data * number.data)
-						is U16 -> U64(this.data * number.data)
-						is U32 -> U64(this.data * number.data)
-						is U64 -> U64(this.data * number.data)
-						else -> error("Can't multiply an unsigned to a signed")
-					}
-
-					is I8 -> when (number) {
-						is I8 -> I32(this.data * number.data)
-						is I16 -> I32(this.data * number.data)
-						is I32 -> I32(this.data * number.data)
-						is I64 -> I64(this.data * number.data)
-						is F32 -> F32(this.data * number.data)
-						is F64 -> F64(this.data * number.data)
-						else -> error("Can't multiply an signed to a unsigned")
-					}
-					is I16 -> when (number) {
-						is I8 -> I32(this.data * number.data)
-						is I16 -> I32(this.data * number.data)
-						is I32 -> I32(this.data * number.data)
-						is I64 -> I64(this.data * number.data)
-						is F32 -> F32(this.data * number.data)
-						is F64 -> F64(this.data * number.data)
-						else -> error("Can't multiply an signed to a unsigned")
-					}
-					is I32 -> when (number) {
-						is I8 -> I32(this.data * number.data)
-						is I16 -> I32(this.data * number.data)
-						is I32 -> I32(this.data * number.data)
-						is I64 -> I64(this.data * number.data)
-						is F32 -> F32(this.data * number.data)
-						is F64 -> F64(this.data * number.data)
-						else -> error("Can't multiply an signed to a unsigned")
-					}
-					is I64 -> when (number) {
-						is I8 -> I64(this.data * number.data)
-						is I16 -> I64(this.data * number.data)
-						is I32 -> I64(this.data * number.data)
-						is I64 -> I64(this.data * number.data)
-						is F32 -> F32(this.data * number.data)
-						is F64 -> F64(this.data * number.data)
-						else -> error("Can't multiply an signed to a unsigned")
-					}
-					is F32 -> when (number) {
-						is I8 -> F32(this.data * number.data)
-						is I16 -> F32(this.data * number.data)
-						is I32 -> F32(this.data * number.data)
-						is I64 -> F32(this.data * number.data)
-						is F32 -> F32(this.data * number.data)
-						is F64 -> F64(this.data * number.data)
-						else -> error("Can't multiply an signed to a unsigned")
-					}
-					is F64 -> when (number) {
-						is I8 -> F64(this.data * number.data)
-						is I16 -> F64(this.data * number.data)
-						is I32 -> F64(this.data * number.data)
-						is I64 -> F64(this.data * number.data)
-						is F32 -> F64(this.data * number.data)
-						is F64 -> F64(this.data * number.data)
-						else -> error("Can't multiply an signed to a unsigned")
-					}
-
-					else -> error("Unknown type: $this")
-				}
-
-				operator fun rem(number: Number): Number = when (this) {
-
-					is U8 -> when (number) {
-						is U8 -> U32(this.data % number.data)
-						is U16 -> U32(this.data % number.data)
-						is U32 -> U32(this.data % number.data)
-						is U64 -> U64(this.data % number.data)
-						else -> error("Can't take the remainder of an unsigned to a signed")
-					}
-					is U16 -> when (number) {
-						is U8 -> U32(this.data % number.data)
-						is U16 -> U32(this.data % number.data)
-						is U32 -> U32(this.data % number.data)
-						is U64 -> U64(this.data % number.data)
-						else -> error("Can't take the remainder of an unsigned to a signed")
-					}
-					is U32 -> when (number) {
-						is U8 -> U32(this.data % number.data)
-						is U16 -> U32(this.data % number.data)
-						is U32 -> U32(this.data % number.data)
-						is U64 -> U64(this.data % number.data)
-						else -> error("Can't take the remainder of an unsigned to a signed")
-					}
-					is U64 -> when (number) {
-						is U8 -> U64(this.data % number.data)
-						is U16 -> U64(this.data % number.data)
-						is U32 -> U64(this.data % number.data)
-						is U64 -> U64(this.data % number.data)
-						else -> error("Can't take the remainder of an unsigned to a signed")
-					}
-
-					is I8 -> when (number) {
-						is I8 -> I32(this.data % number.data)
-						is I16 -> I32(this.data % number.data)
-						is I32 -> I32(this.data % number.data)
-						is I64 -> I64(this.data % number.data)
-						is F32 -> F32(this.data % number.data)
-						is F64 -> F64(this.data % number.data)
-						else -> error("Can't take the remainder of an signed to a unsigned")
-					}
-					is I16 -> when (number) {
-						is I8 -> I32(this.data % number.data)
-						is I16 -> I32(this.data % number.data)
-						is I32 -> I32(this.data % number.data)
-						is I64 -> I64(this.data % number.data)
-						is F32 -> F32(this.data % number.data)
-						is F64 -> F64(this.data % number.data)
-						else -> error("Can't take the remainder of an signed to a unsigned")
-					}
-					is I32 -> when (number) {
-						is I8 -> I32(this.data % number.data)
-						is I16 -> I32(this.data % number.data)
-						is I32 -> I32(this.data % number.data)
-						is I64 -> I64(this.data % number.data)
-						is F32 -> F32(this.data % number.data)
-						is F64 -> F64(this.data % number.data)
-						else -> error("Can't take the remainder of an signed to a unsigned")
-					}
-					is I64 -> when (number) {
-						is I8 -> I64(this.data % number.data)
-						is I16 -> I64(this.data % number.data)
-						is I32 -> I64(this.data % number.data)
-						is I64 -> I64(this.data % number.data)
-						is F32 -> F32(this.data % number.data)
-						is F64 -> F64(this.data % number.data)
-						else -> error("Can't take the remainder of an signed to a unsigned")
-					}
-					is F32 -> when (number) {
-						is I8 -> F32(this.data % number.data)
-						is I16 -> F32(this.data % number.data)
-						is I32 -> F32(this.data % number.data)
-						is I64 -> F32(this.data % number.data)
-						is F32 -> F32(this.data % number.data)
-						is F64 -> F64(this.data % number.data)
-						else -> error("Can't take the remainder of an signed to a unsigned")
-					}
-					is F64 -> when (number) {
-						is I8 -> F64(this.data % number.data)
-						is I16 -> F64(this.data % number.data)
-						is I32 -> F64(this.data % number.data)
-						is I64 -> F64(this.data % number.data)
-						is F32 -> F64(this.data % number.data)
-						is F64 -> F64(this.data % number.data)
-						else -> error("Can't take the remainder of an signed to a unsigned")
-					}
-
-					else -> error("Unknown type: $this")
-				}
-
 
 				companion object {
+					private val BYTE_MIN = BigInteger.valueOf(Byte.MIN_VALUE.toLong())
+					private val BYTE_MAX = BigInteger.valueOf(Byte.MAX_VALUE.toLong())
+					private val SHORT_MIN = BigInteger.valueOf(Short.MIN_VALUE.toLong())
+					private val SHORT_MAX = BigInteger.valueOf(Short.MAX_VALUE.toLong())
+					private val INT_MIN = BigInteger.valueOf(Int.MIN_VALUE.toLong())
+					private val INT_MAX = BigInteger.valueOf(Int.MAX_VALUE.toLong())
+					private val LONG_MIN = BigInteger.valueOf(Long.MIN_VALUE)
+					private val LONG_MAX = BigInteger.valueOf(Long.MAX_VALUE)
+					private val ULONG_MAX = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE)
 
 					fun from(number: kotlin.Number): Number = when (number) {
+						is BigInteger -> from(number)
 						is Byte -> I8(number)
 						is Short -> I16(number)
 						is Int -> I32(number)
@@ -1261,6 +898,15 @@ class CrescentAST {
 						is Float -> F32(number)
 						is Double -> F64(number)
 						else -> error("Unknown type: ${number::class.simpleName}")
+					}
+
+					fun from(number: BigInteger): Number = when {
+						number < LONG_MIN || number > ULONG_MAX -> throw IllegalArgumentException("Integer literal is outside the Crescent 64-bit range: $number")
+						number in BYTE_MIN..BYTE_MAX -> I8(number.toByte())
+						number in SHORT_MIN..SHORT_MAX -> I16(number.toShort())
+						number in INT_MIN..INT_MAX -> I32(number.toInt())
+						number <= LONG_MAX -> I64(number.toLong())
+						else -> U64(number.toString().toULong())
 					}
 
 				}

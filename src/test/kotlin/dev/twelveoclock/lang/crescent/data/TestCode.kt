@@ -1,14 +1,5 @@
 package dev.twelveoclock.lang.crescent.data
 
-/*
-TODO:
-	- Bit shifting
-	- Triangles
-	- Negative numbers and multiplication through parenthesis
-	- Function blocks as parameters and values for variables
-	- Function references
-	- Arrays
-*/
 internal object TestCode {
 
 	const val helloWorlds =
@@ -74,63 +65,6 @@ internal object TestCode {
 			}
 		"""
 
-	const val strings =
-		"""			
-			fun main {
-				val number = 1			
-				var thing = "Me"
-				
-				thing += "ow"
-				
-			    println("Meow ${'$'}number")
-				println(thing)
-				
-				
-				val multiLine1 = \"\"\"
-					Meow
-					Meow
-				\"\"\"
-				
-				println(multiLine1)
-				
-				val multiLine2 = 
-					\"\"\"
-						Meow2
-						Meow2
-					\"\"\"
-				
-				println(multiLine2)
-			}
-		"""
-
-
-	const val variables =
-		"""
-		    fun main {
-				
-				var thing1 = "Meow"
-				var thing2 = 1
-				var thing3: Char = 'c'
-				var thing4: I32
-				var thing5 = [1]
-				var thing6 = ["Meow"]
-				
-				thing1 = "Mew"
-				thing2 += 1
-				thing3 = 'a'
-				thing4 = 1
-				thing5[0] = 2
-				thing6[0] = "Mew"
-				
-				println(thing1)
-				println(thing2)
-				println(thing3)
-				println(thing4)
-				println(thing5)
-				println(thing6)
-			}
-		"""
-
 	const val ifStatement =
 		"""
 			fun test1(args: [String]) {
@@ -174,7 +108,6 @@ internal object TestCode {
             }
         """
 
-	// Can't be constant due to lack of escaping $'s :C
 	const val stringInterpolation =
 		"""
 		    fun main {
@@ -199,7 +132,6 @@ internal object TestCode {
             }
 		"""
 
-	// Can't be constant due to lack of escaping $'s :C
 	const val forLoop1 =
 		"""
 		    fun main {
@@ -218,22 +150,6 @@ internal object TestCode {
 			
 			    for x, y, z in 0..9, 0..9, 0..9 {
 			        println("${'$'}x${'$'}y${'$'}z")
-			    }
-
-                println("Hello World")
-            }
-		"""
-
-	const val forLoop2 =
-		"""
-		    fun main {
-		     
-		        val x, y, z = 0
-                
-				println("" + x + y + z)
-			
-			    for x, y, z in 0..10, 0..10, 0..10 {
-			        println("x: " + x + " y: " + y + " z: " + z)
 			    }
 
                 println("Hello World")
@@ -298,7 +214,7 @@ internal object TestCode {
 			
 	        struct Example(
                 val aNumber: I8           # New lines makes commas redundant
-                val aValue1 aValue2 = ""  # Multi declaration of same type, can all be set to one or multiple default values
+                val aValue1 aValue2 = ""  # Grouped fields share one default value
             )
 			
 			fun main {
@@ -311,13 +227,12 @@ internal object TestCode {
 			
 		"""
 
-	// TODO: Add traits and inheriting  impl Example : Cat
 	const val impl =
 		"""
 			
             struct Example(
                 val aNumber: I32          # New lines makes commas redundant
-                val aValue1 aValue2 = ""  # Multi declaration of same type, can all be set to one or multiple default values
+                val aValue1 aValue2 = ""  # Grouped fields share one default value
             )
 
             impl Example {
@@ -368,40 +283,6 @@ internal object TestCode {
                 println((1.0 + 1) + 1.0 / 10.0 + 1000.0 * 10.0 / 11.0 ^ 10.0)
 				println(4 * (3) + 1)
             }
-		"""
-
-	const val triangleRecursion =
-		"""
-			fun printSpaces(count: Any) {
-				print(" ")
-				if (count > 0) {
-					printSpaces(count - 1)
-				}
-			}
-			
-			fun printStars(count: Any) {
-				print("* ")
-				if (count > 1) {
-					printStars(count - 1)
-				}
-			}
-			
-			fun printTriangle(size: Any, max: Any) {
-				if (size > 0) {
-					printSpaces(size)
-					printStars((max - size) + 1)
-					println("")
-					printTriangle(size - 1, max)
-				}
-			}
-			
-			fun printer(size: Any) {
-				printTriangle(size, size)
-			}
-			
-			fun main {
-				printer(100)
-			}
 		"""
 
 	const val sealed =
@@ -459,8 +340,9 @@ internal object TestCode {
                 1 -#Meow
                 1 /#Meow
                 1 *#Meow
-                1 =#Meow
-            #}			
+                1 = 1 #Meow
+			# The brace in this comment must not close the function: }
+			}
 		"""
 
 	const val imports =
@@ -504,45 +386,4 @@ internal object TestCode {
 			}
 		"""
 
-	const val katCircle =
-		"""
-			
-		"""
-
-
-	// This breaks Crescent due to the parenthesis in the while
-	/*
-        val code =
-            """
-
-            fun printCircleLine(size radius: Any) {
-
-               print(radius)
-               print(" ")
-               print(size)
-
-               var count = 0
-               while (count < ((radius / 2) - size)) {
-                 count = count + 1
-               }
-
-               count = 0
-               while (count < size) {
-                  print('*')
-                  count = count + 1
-               }
-            }
-
-            fun printCircle(radius: Any) {
-              var count = 0
-              while (count < radius) {
-                printCircleLine(count, radius)
-              }
-            }
-
-            fun main {
-              printCircle(10)
-            }
-		    """
-	*/
 }
