@@ -1,9 +1,14 @@
 package dev.twelveoclock.lang.crescent.cli
 
 import dev.twelveoclock.lang.crescent.compiler.CrescentIRCompiler
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticException
+import dev.twelveoclock.lang.crescent.project.CrescentModuleResolutionException
+import dev.twelveoclock.lang.crescent.ptir.PoderTechIrExecutionException
+import dev.twelveoclock.lang.crescent.ptir.PoderTechIrExecutor
 import dev.twelveoclock.lang.crescent.translators.KotlinToCrescentTranslator
 import dev.twelveoclock.lang.crescent.translators.PoderTechIrTranslator
 import dev.twelveoclock.lang.crescent.vm.CrescentIRVM
+import dev.twelveoclock.lang.crescent.vm.CrescentRuntimeException
 import dev.twelveoclock.lang.crescent.vm.CrescentVM
 import dev.twelveoclock.lang.crescent.vm.RuntimeIO
 import java.io.InputStream
@@ -21,6 +26,7 @@ object CrescentCli {
   crescent <file-or-directory> [-- program args]
   crescent ir <file-or-directory> [-- program args]
   crescent ptir <file-or-directory>
+  crescent ptir-run <file-or-directory> [-- program args]
   crescent kotlin-to-crescent <file.kt>"""
 
 	@JvmOverloads
@@ -46,6 +52,18 @@ object CrescentCli {
 			err.println("error: ${exception.message}")
 			err.println("Run 'crescent --help' for usage.")
 			2
+		} catch (exception: DiagnosticException) {
+			err.println(exception.diagnostic.render())
+			1
+		} catch (exception: CrescentModuleResolutionException) {
+			err.println(exception.diagnostic.render())
+			1
+		} catch (exception: CrescentRuntimeException) {
+			err.println(exception.diagnostic.render())
+			1
+		} catch (exception: PoderTechIrExecutionException) {
+			err.println(exception.diagnostic.render())
+			1
 		} catch (exception: Exception) {
 			err.println("error: ${exception.message ?: exception::class.simpleName ?: "Program execution failed"}")
 			1
@@ -67,6 +85,11 @@ object CrescentCli {
 				val sourceSet = CrescentProjectLoader.loadSourceSet(request.input)
 				out.println(PoderTechIrTranslator.translate(sourceSet.files))
 			}
+			CrescentCommand.PTIR_RUN -> {
+				val project = CrescentProjectLoader.load(request.input)
+				val program = PoderTechIrTranslator.translate(project.files)
+				PoderTechIrExecutor(program, RuntimeIO.streams(input, out)).invokeMain(request.programArgs)
+			}
 			CrescentCommand.KOTLIN_TO_CRESCENT -> executeKotlinTranslation(request, out)
 		}
 	}
@@ -77,7 +100,7 @@ object CrescentCli {
 		if (!input.fileName.toString().endsWith(".kt", ignoreCase = true)) {
 			throw CliExecutionException("Kotlin source must use the .kt extension: $input")
 		}
-		out.println(KotlinToCrescentTranslator.translate(input.readText()))
+		out.println(KotlinToCrescentTranslator.translate(input.readText(), input.toString()))
 	}
 
 	private fun executeDirect(project: CrescentProject, args: List<String>, io: RuntimeIO) {

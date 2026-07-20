@@ -1,9 +1,11 @@
 package dev.twelveoclock.lang.crescent.cli
 
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticException
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node
 import dev.twelveoclock.lang.crescent.lexers.CrescentLexer
 import dev.twelveoclock.lang.crescent.parsers.CrescentParser
 import dev.twelveoclock.lang.crescent.project.CrescentModuleResolver
+import dev.twelveoclock.lang.crescent.project.CrescentModuleResolutionException
 import dev.twelveoclock.lang.crescent.project.CrescentStandardLibrary
 import java.nio.file.Files
 import java.nio.file.Path
@@ -85,6 +87,10 @@ object CrescentProjectLoader {
 	private fun link(parsed: ParsedSourceSet): CrescentSourceSet {
 		val files = try {
 			CrescentModuleResolver.link(parsed.projectRoot, parsed.userFiles, CrescentStandardLibrary.load())
+		} catch (exception: DiagnosticException) {
+			throw exception
+		} catch (exception: CrescentModuleResolutionException) {
+			throw exception
 		} catch (exception: Exception) {
 			throw CliExecutionException(
 				"Could not link Crescent project at ${parsed.input}: ${exception.message ?: exception::class.simpleName}",
@@ -103,7 +109,9 @@ object CrescentProjectLoader {
 	)
 
 	private fun parse(path: Path): Node.File = try {
-		CrescentParser.invoke(path, CrescentLexer.invoke(path.readText()))
+		CrescentParser.invoke(path, CrescentLexer.invoke(path, path.readText()))
+	} catch (exception: DiagnosticException) {
+		throw exception
 	} catch (exception: Exception) {
 		throw CliExecutionException("Could not parse $path: ${exception.message ?: exception::class.simpleName}", exception)
 	}

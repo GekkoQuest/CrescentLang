@@ -1,11 +1,13 @@
 package dev.twelveoclock.lang.crescent.vm
 
+import dev.twelveoclock.lang.crescent.diagnostics.SourceLocations
 import dev.twelveoclock.lang.crescent.language.ir.*
 import dev.twelveoclock.lang.crescent.project.extensions.minimize
 import java.util.LinkedList
 import java.util.IdentityHashMap
 import java.math.BigDecimal
 import java.math.BigInteger
+import java.nio.file.Path
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -721,7 +723,9 @@ private class ProgramExecution(
 		return last
 	}
 
-	private fun execute(statement: IRStatement, frame: Frame): Any? = when (statement) {
+	private fun execute(statement: IRStatement, frame: Frame): Any? = sourceRuntime(statement, frame) { executeImpl(statement, frame) }
+
+	private fun executeImpl(statement: IRStatement, frame: Frame): Any? = when (statement) {
 		is IRStatement.Evaluate -> evaluate(statement.expression, frame)
 		is IRStatement.Declare -> {
 			val value = evaluate(statement.initializer, frame)
@@ -779,7 +783,9 @@ private class ProgramExecution(
 		return UnitValue
 	}
 
-	private fun evaluate(expression: IRExpression, frame: Frame): Any? = when (expression) {
+	private fun evaluate(expression: IRExpression, frame: Frame): Any? = sourceRuntime(expression, frame) { evaluateImpl(expression, frame) }
+
+	private fun evaluateImpl(expression: IRExpression, frame: Frame): Any? = when (expression) {
 		IRExpression.This -> frame.holder ?: error("'this' is unavailable outside a member function")
 		is IRExpression.Literal -> literal(expression.value)
 		is IRExpression.Array -> ArrayValue(expression.elements.map { evaluate(it, frame) })
@@ -824,6 +830,24 @@ private class ProgramExecution(
 			else -> error("Result propagation expects Success or Failure")
 		}
 		is IRExpression.Conditional -> execute(expression.statement, frame)
+	}
+
+	private inline fun <T> sourceRuntime(node: Any, frame: Frame, action: () -> T): T = try {
+		action()
+	} catch (signal: ReturnSignal) {
+		throw signal
+	} catch (signal: BreakSignal) {
+		throw signal
+	} catch (signal: ContinueSignal) {
+		throw signal
+	} catch (signal: PropagateSignal) {
+		throw signal
+	} catch (exception: CrescentRuntimeException) {
+		throw exception.withSourceSpan(SourceLocations.spanOf(node))
+	} catch (exception: RuntimeException) {
+		val span = SourceLocations.spanOf(node) ?: throw exception
+		val path = runCatching { Path.of(span.sourceId) }.getOrElse { Path.of(frame.source.sourcePath) }
+		throw CrescentRuntimeException(path, span, exception.message ?: exception::class.simpleName.orEmpty(), exception)
 	}
 
 	private fun call(expression: IRExpression.Call, frame: Frame): Any? {

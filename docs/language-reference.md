@@ -181,19 +181,25 @@ compatibility.
 `kotlin-to-crescent` translates the explicitly tested Kotlin subset; it is not a
 general Kotlin compiler. Its structured parser covers the declaration,
 container, literal, cast/type-test, return, and control-flow shapes exercised by
-the translator tests while preserving comments and quoted text. Allowlisted
-`@JvmStatic`, `@Suppress`, and `@Deprecated` annotations become non-semantic
-provenance comments; semantic or unsupported annotations reject. Nullable
-types, safe calls, Elvis expressions, generics, qualified/function types,
-unsupported operators, malformed declarations, and bare returns are rejected
-at exact source offsets instead of being rewritten approximately.
+the translator tests while preserving comments and quoted text. Faithful shapes
+include enum classes, direct sealed class/object variants, subject/named/
+subjectless `when`, inclusive-range loops, regular and raw string templates,
+and Kotlin reference equality. Allowlisted `@JvmStatic`, `@Suppress`, and
+`@Deprecated` annotations become non-semantic provenance comments; semantic or
+unsupported annotations reject. Nullable types, safe calls, Elvis expressions,
+generics, qualified/function types, unsupported operators, malformed
+declarations, and bare returns are rejected with exact half-open source spans
+instead of being rewritten approximately.
 
-`ptir` is a structural export with source-qualified callable identity,
-visibility, modifiers, recursive types, declarations, and structural snapshots
-of executable nodes. The export is not itself an executable lowering. It
-accepts a linked source set without `main`, so it can export a library;
-unsupported execution semantics, loss boundaries, or future AST shapes fail
-explicitly instead of being silently dropped.
+`ptir` prints a structural export with source-qualified callable identity,
+visibility, modifiers, recursive types, declarations, and defensive snapshots
+of executable nodes. It accepts a linked source set without `main`, so it can
+export a library. `ptir-run` executes the same model using
+`PoderTechIrExecutor`, an independent interpreter that does not delegate to the
+direct or lower-IR VM. It accepts a zero-parameter `main` or one `[String]`
+parameter, forwards arguments after `--`, and uses caller-injected `RuntimeIO`.
+Unsupported semantics, loss boundaries, or future AST shapes fail explicitly
+instead of being silently dropped.
 
 ## Execution models and boundaries
 
@@ -210,19 +216,29 @@ explicitly instead of being silently dropped.
   assignment supports builtin numeric operations only and does not dispatch a
   user operator; write `x = x + value` for custom dispatch, accepting that the
   separate read/compute/write is not atomic.
-- Diagnostics identify source paths and token or command indexes rather than
-  complete source spans. Kotlin translation is a principled subset, the
-  standard library is intentionally minimal, and this repository does not
-  publish a Maven artifact or promise a general-purpose toolchain.
-- The active `crescent.std.core` and `crescent.std.math` packages are
+- Source-tied lexer, parser, linker, compiler, runtime, PTIR, and Kotlin
+  translation failures use `path:line:column-endLine:endColumn: error: message`.
+  Offsets and columns count UTF-16 code units, lines and columns are one-based,
+  CRLF is one newline, and the end is exclusive. Filesystem/usage failures that
+  do not originate in source naturally have no source span.
+- The active `crescent.std.core`, `crescent.std.math`,
+  `crescent.std.collections`, and `crescent.std.text` packages are
   Crescent-authored; host primitives are Kotlin runtime services exposed
-  through `RuntimeIO`. Other bundled `.unimplemented` files remain design
-  sketches and are excluded from processed resources and distributions.
+  through `RuntimeIO`. The library is useful but intentionally bounded.
+  `absoluteI32(I32.MIN)` retains `I32.MIN` under the tested fixed-width wrapping
+  behavior. Other bundled `.unimplemented` files remain design sketches and are
+  excluded from processed resources and distributions.
+- The build publishes `dev.twelveoclock.lang:crescent-lang:0.0.1` with main,
+  sources, and maintained-documentation JARs. `verifyMavenPublication` checks an
+  isolated repository and compiles a clean consumer; `publishToMavenLocal`
+  installs locally. Remote deployment and signing remain unconfigured.
+- Kotlin translation remains a principled, precisely rejected subset, and the
+  repository does not promise a stable general-purpose toolchain.
 
 ## Bundled examples
 
 `src/main/resources/crescent/examples/hello_world.moo` is the public smoke
-example for `run`, `ir`, and `ptir`. Active standard-library sources live under
-`crescent/stdlib/` and are loaded from `modules.list` with explicit package IDs.
-Historical examples, aspirational library sketches, and legacy `builtin/`
-definitions keep the `.unimplemented` suffix and are not loaded.
+example for `run`, `ir`, `ptir`, and `ptir-run`. Active standard-library sources
+live under `crescent/stdlib/` and are loaded from `modules.list` with explicit
+package IDs. Historical examples, aspirational library sketches, and legacy
+`builtin/` definitions keep the `.unimplemented` suffix and are not loaded.

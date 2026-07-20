@@ -1,5 +1,9 @@
 package dev.twelveoclock.lang.crescent.compiler
 
+import dev.twelveoclock.lang.crescent.diagnostics.Diagnostic
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticException
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticSeverity
+import dev.twelveoclock.lang.crescent.diagnostics.SourceLocations
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node.File
 import dev.twelveoclock.lang.crescent.language.ir.*
@@ -12,10 +16,17 @@ object CrescentIRCompiler {
 	fun invoke(file: File): CrescentIR = invoke(listOf(file), file)
 
 	fun invoke(files: List<File>, mainFile: File): CrescentIR {
-		require(files.isNotEmpty()) { "At least one file is required to compile Crescent IR" }
-		require(files.any { it === mainFile }) { "The main file must be included in the compiler input" }
-		val lowerer = Lowerer(files.toList(), mainFile)
-		return CrescentIR(listOf(CrescentIR.Command.Program(lowerer.lower())))
+		try {
+			require(files.isNotEmpty()) { "At least one file is required to compile Crescent IR" }
+			require(files.any { it === mainFile }) { "The main file must be included in the compiler input" }
+			val lowerer = Lowerer(files.toList(), mainFile)
+			return CrescentIR(listOf(CrescentIR.Command.Program(lowerer.lower())))
+		} catch (exception: DiagnosticException) {
+			throw exception
+		} catch (exception: IllegalArgumentException) {
+			val span = SourceLocations.spanOf(mainFile) ?: throw exception
+			throw DiagnosticException(Diagnostic(DiagnosticSeverity.ERROR, exception.message ?: "Could not lower Crescent program", span), exception)
+		}
 	}
 
 	private class Lowerer(private val files: List<File>, private val mainFile: File) {
@@ -71,7 +82,7 @@ object CrescentIRCompiler {
 				putAll(file.functions.toSortedMap())
 				file.mainFunction?.let { put(it.name, it) }
 			}.values.map { lowerFunction(source, it, null, file) }
-			return SourceUnitIR(
+			return SourceLocations.copy(file, SourceUnitIR(
 				source = source,
 				imports = imports,
 				structs = file.structs.toSortedMap().values.map { struct ->
@@ -94,11 +105,11 @@ object CrescentIRCompiler {
 				globals = globals,
 				functions = topFunctions,
 				implementations = (file.impls.toSortedMap().values + file.staticImpls.toSortedMap().values).map { lowerImpl(source, it, file) },
-			)
+			))
 		}
 
 		private fun lowerGlobal(source: SourceId, variable: Node.Variable, constant: Boolean, file: File): GlobalIR =
-			GlobalIR(
+			SourceLocations.copy(variable, GlobalIR(
 				symbol(source, if (constant) SymbolKind.CONSTANT else SymbolKind.GLOBAL, variable.name),
 				when (variable) {
 					is Node.Variable.Basic -> variable.visibility.ir()
@@ -106,7 +117,7 @@ object CrescentIRCompiler {
 					else -> IRVisibility.PRIVATE
 				},
 				lowerType(variable.type, file), !variable.isFinal, expression(variable.value, FunctionContext(file)),
-			)
+			))
 
 		private fun lowerFields(variables: List<Node.Variable>, file: File, owner: IRType): List<FieldIR> {
 			val prior = linkedSetOf<String>()
@@ -117,14 +128,14 @@ object CrescentIRCompiler {
 			val value = variable.value
 			val initializer = if (value is Node.Expression && value.nodes.isEmpty()) null
 			else expression(value, FunctionContext(file, owner, ownerMembers))
-			return FieldIR(
+			return SourceLocations.copy(variable, FieldIR(
 				variable.name, lowerType(variable.type, file), !variable.isFinal,
 				when (variable) {
 					is Node.Variable.Basic -> variable.visibility.ir()
 					is Node.Variable.Constant -> variable.visibility.ir()
 					else -> IRVisibility.PRIVATE
 				}, initializer,
-			)
+			))
 		}
 
 		private fun lowerSealed(source: SourceId, sealed: Node.Sealed, file: File): SealedIR {
@@ -171,8 +182,9 @@ object CrescentIRCompiler {
 		private fun lowerFunction(source: SourceId, node: Node.Function, owner: IRType?, file: File, ownerMembers: Set<String> = emptySet()): FunctionIR {
 			val context = FunctionContext(file, owner, ownerMembers)
 			val parameters = lowerParameters(node.params, context)
-			return FunctionIR(symbol(source, SymbolKind.FUNCTION, node.name), owner, node.visibility.ir(),
+			return SourceLocations.copy(node, FunctionIR(symbol(source, SymbolKind.FUNCTION, node.name), owner, node.visibility.ir(),
 				node.modifiers.mapTo(linkedSetOf()) { it.ir() }, parameters, lowerType(node.returnType, file), block(node.innerCode, context))
+			)
 		}
 
 		private fun lowerParameters(parameters: List<Node.Parameter>, context: FunctionContext): List<ParameterIR> = parameters.map { parameter ->
@@ -199,10 +211,11 @@ object CrescentIRCompiler {
 		}
 
 		private fun block(node: Node.Statement.Block, context: FunctionContext): IRBlock = context.scope {
-			IRBlock(node.nodes.map { statement(it, context) })
+			SourceLocations.copy(node, IRBlock(node.nodes.map { statement(it, context) }))
 		}
 
-		private fun statement(node: Node, context: FunctionContext): IRStatement = when (node) {
+		private fun statement(node: Node, context: FunctionContext): IRStatement {
+			val lowered = when (node) {
 			is Node.Variable.Local -> expression(node.value, context).let { initializer -> IRStatement.Declare(context.declare(node.name), node.name, lowerType(node.type, context.file), !node.isFinal, initializer) }
 			is Node.Variable.Basic -> expression(node.value, context).let { initializer -> IRStatement.Declare(context.declare(node.name), node.name, lowerType(node.type, context.file), !node.isFinal, initializer) }
 			is Node.Return -> IRStatement.Return(expression(node.expression, context))
@@ -228,6 +241,8 @@ object CrescentIRCompiler {
 			CrescentToken.Keyword.BREAK -> IRStatement.Break
 			CrescentToken.Keyword.CONTINUE -> IRStatement.Continue
 			else -> IRStatement.Evaluate(expression(node, context))
+			}
+			return SourceLocations.copy(node, lowered)
 		}
 
 		private sealed interface RawExpression {
@@ -236,7 +251,8 @@ object CrescentIRCompiler {
 			data class Binary(val operator: CrescentToken.Operator, val left: RawExpression, val right: RawExpression) : RawExpression
 		}
 
-		private fun expression(node: Node, context: FunctionContext): IRExpression = when (node) {
+		private fun expression(node: Node, context: FunctionContext): IRExpression {
+			val lowered = try { when (node) {
 			is Node.Expression -> lowerRaw(buildRaw(node), context)
 			is Node.Primitive.Boolean -> IRExpression.Literal(IRLiteral.Boolean(node.data))
 			is Node.Primitive.String -> IRExpression.Literal(IRLiteral.String(node.data))
@@ -259,7 +275,14 @@ object CrescentIRCompiler {
 			is Node.InfixCall -> IRExpression.Call(CallTargetIR.Member(expression(node.receiver, context), node.functionName), listOf(expression(node.argument, context)))
 			is Node.TypeLiteral -> IRExpression.TypeValue(lowerType(node.type, context.file))
 			is Node.Statement.If -> IRExpression.Conditional(statement(node, context) as IRStatement.If)
-			else -> throw IllegalArgumentException("Unsupported expression node ${node::class.simpleName} in ${context.file.path}")
+				else -> throw IllegalArgumentException("Unsupported expression node ${node::class.simpleName} in ${context.file.path}")
+			} } catch (exception: DiagnosticException) {
+				throw exception
+			} catch (exception: IllegalArgumentException) {
+				val span = SourceLocations.spanOf(node) ?: throw exception
+				throw DiagnosticException(Diagnostic(DiagnosticSeverity.ERROR, exception.message ?: "Could not lower expression", span), exception)
+			}
+			return SourceLocations.copy(node, lowered)
 		}
 
 		private fun identifier(name: String, context: FunctionContext): IRExpression {
@@ -364,7 +387,8 @@ object CrescentIRCompiler {
 			}
 		}
 
-		private fun lowerType(type: Node.Type, file: File): IRType = when (type) {
+		private fun lowerType(type: Node.Type, file: File): IRType {
+			val lowered = try { when (type) {
 			Node.Type.Implicit -> IRType.Implicit
 			is Node.Type.Array -> IRType.Array(lowerType(type.type, file))
 			is Node.Type.Result -> IRType.Result(lowerType(type.type, file))
@@ -376,7 +400,14 @@ object CrescentIRCompiler {
 					declaredType(symbol)
 				}
 			}
-			else -> throw IllegalArgumentException("Unsupported type node ${type::class.simpleName}")
+				else -> throw IllegalArgumentException("Unsupported type node ${type::class.simpleName}")
+			} } catch (exception: DiagnosticException) {
+				throw exception
+			} catch (exception: IllegalArgumentException) {
+				val span = SourceLocations.spanOf(type) ?: throw exception
+				throw DiagnosticException(Diagnostic(DiagnosticSeverity.ERROR, exception.message ?: "Could not lower type", span), exception)
+			}
+			return SourceLocations.copy(type, lowered)
 		}
 
 		private fun declaredType(symbol: SymbolRef): IRType.Declared = if (symbol.enclosingTypeName == null) IRType.Declared(symbol)

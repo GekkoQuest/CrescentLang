@@ -7,6 +7,7 @@ enum class CrescentCommand {
 	RUN,
 	IR,
 	PTIR,
+	PTIR_RUN,
 	KOTLIN_TO_CRESCENT,
 }
 
@@ -28,6 +29,7 @@ object CliArguments {
 		"run" to CrescentCommand.RUN,
 		"ir" to CrescentCommand.IR,
 		"ptir" to CrescentCommand.PTIR,
+		"ptir-run" to CrescentCommand.PTIR_RUN,
 		"kotlin-to-crescent" to CrescentCommand.KOTLIN_TO_CRESCENT,
 	)
 
@@ -52,7 +54,7 @@ object CliArguments {
 				else "Expected one source file or project directory, but received ${inputs.size}",
 			)
 		}
-		if (separator != null && command !in setOf(CrescentCommand.RUN, CrescentCommand.IR)) {
+		if (separator != null && command !in setOf(CrescentCommand.RUN, CrescentCommand.IR, CrescentCommand.PTIR_RUN)) {
 			throw CliException("${command.displayName} does not accept program arguments")
 		}
 

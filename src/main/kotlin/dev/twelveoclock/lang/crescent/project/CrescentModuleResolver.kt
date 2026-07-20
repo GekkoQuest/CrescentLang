@@ -1,11 +1,21 @@
 package dev.twelveoclock.lang.crescent.project
 
+import dev.twelveoclock.lang.crescent.diagnostics.Diagnostic
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticSeverity
+import dev.twelveoclock.lang.crescent.diagnostics.SourceLocations
+import dev.twelveoclock.lang.crescent.diagnostics.SourceSpan
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken
 import java.nio.file.Path
 import java.util.Collections
 
-class CrescentModuleResolutionException(message: String, cause: Throwable? = null) : IllegalArgumentException(message, cause)
+class CrescentModuleResolutionException(message: String, cause: Throwable? = null) : IllegalArgumentException(message, cause) {
+	@Volatile var sourceSpan: SourceSpan? = null
+		private set
+	val diagnostic: Diagnostic get() = Diagnostic(DiagnosticSeverity.ERROR, super.message.orEmpty(), sourceSpan)
+	constructor(span: SourceSpan, message: String, cause: Throwable? = null) : this(message, cause) { sourceSpan = span }
+	override val message: String get() = sourceSpan?.let { diagnostic.render() } ?: super.message.orEmpty()
+}
 
 object CrescentModuleResolver {
 
@@ -20,27 +30,27 @@ object CrescentModuleResolver {
 		val linkedUserFiles = userFiles.map { file ->
 			val path = file.path.toAbsolutePath().normalize()
 			if (!path.startsWith(root)) {
-				fail("Source $path is outside project root $root")
+				fail("Source $path is outside project root $root", file)
 			}
 			val relative = root.relativize(path)
-			val packageId = packageId(relative.parent, path)
+			val packageId = packageId(relative.parent, path, file)
 			if (isStandardLibraryPackage(packageId)) {
-				fail("User source $path uses reserved package '$packageId'")
+				fail("User source $path uses reserved package '$packageId'", file)
 			}
-			snapshot(file.copy(path = path, packageId = packageId, importedSymbols = emptyMap()))
+			snapshot(SourceLocations.copy(file, file.copy(path = path, packageId = packageId, importedSymbols = emptyMap())))
 		}
 		val linkedStandardLibrary = standardLibraryFiles.map { file ->
 			val path = file.path.normalize()
 			if (!isStandardLibraryPackage(file.packageId)) {
-				fail("Standard-library source $path must declare a '$STANDARD_LIBRARY_PREFIX' package, got '${file.packageId}'")
+				fail("Standard-library source $path must declare a '$STANDARD_LIBRARY_PREFIX' package, got '${file.packageId}'", file)
 			}
-			validatePackageId(file.packageId, path)
-			snapshot(file.copy(path = path, importedSymbols = emptyMap()))
+			validatePackageId(file.packageId, path, file)
+			snapshot(SourceLocations.copy(file, file.copy(path = path, importedSymbols = emptyMap())))
 		}
 		val files = (linkedUserFiles + linkedStandardLibrary).sortedBy { normalizedPathText(it.path) }
 		val declarationsByPackage = buildPackageDeclarations(files)
 		return immutableList(files.map { file ->
-			snapshot(file.copy(importedSymbols = immutable(resolveImports(file, declarationsByPackage))))
+			snapshot(SourceLocations.copy(file, file.copy(importedSymbols = immutable(resolveImports(file, declarationsByPackage)))))
 		})
 	}
 
@@ -58,6 +68,7 @@ object CrescentModuleResolver {
 					fail(
 						"Duplicate symbol '${symbol.sourceName}' in package '${displayPackage(file.packageId)}': " +
 							locations.joinToString { describeDeclaration(it) },
+						symbol,
 					)
 				}
 			}
@@ -70,29 +81,36 @@ object CrescentModuleResolver {
 			name: String,
 			kind: Node.ModuleSymbolKind,
 			visibility: CrescentToken.Visibility,
+			node: Node,
 			enclosingTypeName: String? = null,
 		) {
-			add(Node.ModuleSymbol(file.packageId, file.path.normalize(), name, kind, visibility, enclosingTypeName))
+			add(SourceLocations.copyOrAttach(
+				node,
+				Node.ModuleSymbol(file.packageId, file.path.normalize(), name, kind, visibility, enclosingTypeName),
+				SourceLocations.spanOf(file),
+			))
 		}
-		fun addSymbols(
+		fun <T : Node> addSymbols(
 			kind: Node.ModuleSymbolKind,
-			entries: Map<String, CrescentToken.Visibility>,
+			entries: Map<String, T>,
+			visibility: (T) -> CrescentToken.Visibility,
 		) {
-			entries.toSortedMap().forEach { (name, visibility) ->
-				addSymbol(name, kind, visibility)
+			entries.toSortedMap().forEach { (name, node) ->
+				addSymbol(name, kind, visibility(node), node)
 			}
 		}
-		addSymbols(Node.ModuleSymbolKind.FUNCTION, file.functions.mapValues { it.value.visibility })
-		addSymbols(Node.ModuleSymbolKind.VARIABLE, file.variables.mapValues { it.value.visibility })
-		addSymbols(Node.ModuleSymbolKind.CONSTANT, file.constants.mapValues { it.value.visibility })
-		addSymbols(Node.ModuleSymbolKind.STRUCT, file.structs.mapValues { it.value.visibility })
-		addSymbols(Node.ModuleSymbolKind.SEALED, file.sealeds.mapValues { it.value.visibility })
+		addSymbols(Node.ModuleSymbolKind.FUNCTION, file.functions) { it.visibility }
+		addSymbols(Node.ModuleSymbolKind.VARIABLE, file.variables) { it.visibility }
+		addSymbols(Node.ModuleSymbolKind.CONSTANT, file.constants) { it.visibility }
+		addSymbols(Node.ModuleSymbolKind.STRUCT, file.structs) { it.visibility }
+		addSymbols(Node.ModuleSymbolKind.SEALED, file.sealeds) { it.visibility }
 		file.sealeds.toSortedMap().values.forEach { sealed ->
 			sealed.structs.sortedBy(Node.Struct::name).forEach { nested ->
 				addSymbol(
 					nested.name,
 					Node.ModuleSymbolKind.STRUCT,
 					effectiveVisibility(sealed.visibility, nested.visibility),
+					nested,
 					sealed.name,
 				)
 			}
@@ -101,13 +119,14 @@ object CrescentModuleResolver {
 					nested.name,
 					Node.ModuleSymbolKind.OBJECT,
 					effectiveVisibility(sealed.visibility, nested.visibility),
+					nested,
 					sealed.name,
 				)
 			}
 		}
-		addSymbols(Node.ModuleSymbolKind.TRAIT, file.traits.mapValues { it.value.visibility })
-		addSymbols(Node.ModuleSymbolKind.OBJECT, file.objects.mapValues { it.value.visibility })
-		addSymbols(Node.ModuleSymbolKind.ENUM, file.enums.mapValues { it.value.visibility })
+		addSymbols(Node.ModuleSymbolKind.TRAIT, file.traits) { it.visibility }
+		addSymbols(Node.ModuleSymbolKind.OBJECT, file.objects) { it.visibility }
+		addSymbols(Node.ModuleSymbolKind.ENUM, file.enums) { it.visibility }
 	}
 
 	private fun resolveImports(
@@ -130,9 +149,10 @@ object CrescentModuleResolver {
 			val targetPackage = declarationsByPackage[targetPackageId]
 				?: fail(
 					"Import in ${file.path} refers to missing package '${displayPackage(targetPackageId)}'",
+					importNode,
 				)
 			if (importNode.typeName == "*") {
-				if (importNode.typeAlias != null) fail("Wildcard import in ${file.path} cannot have an alias")
+				if (importNode.typeAlias != null) fail("Wildcard import in ${file.path} cannot have an alias", importNode)
 				targetPackage.toSortedMap().forEach { (name, symbol) ->
 					if (isAccessible(file, symbol)) wildcardCandidates.getOrPut(name) { mutableListOf() }.add(symbol)
 				}
@@ -143,21 +163,23 @@ object CrescentModuleResolver {
 				?: fail(
 					"Import in ${file.path} refers to missing symbol '${importNode.typeName}' " +
 						"in package '${displayPackage(targetPackageId)}'",
+					importNode,
 				)
 			if (!isAccessible(file, symbol)) {
 				fail(
 					"Import in ${file.path} cannot access ${symbol.visibility.name.lowercase()} symbol " +
 						"'${symbol.sourceName}' from ${symbol.declarationPath} in package '${displayPackage(targetPackageId)}'",
+					importNode,
 				)
 			}
 			val localName = importNode.typeAlias ?: importNode.typeName
 			val local = ownDeclarations[localName]
 			if (local != null && local != symbol) {
-				fail("Import alias '$localName' in ${file.path} conflicts with a declaration in the same file")
+				fail("Import alias '$localName' in ${file.path} conflicts with a declaration in the same file", importNode)
 			}
 			val implicit = implicitPackageBindings[localName]
 			if (implicit != null && implicit != symbol) {
-				fail("Import alias '$localName' in ${file.path} conflicts with package symbol at ${implicit.declarationPath}")
+				fail("Import alias '$localName' in ${file.path} conflicts with package symbol at ${implicit.declarationPath}", importNode)
 			}
 			val previous = exactBindings.putIfAbsent(localName, symbol)
 			if (previous != null && previous != symbol) {
@@ -165,6 +187,7 @@ object CrescentModuleResolver {
 					"Conflicting exact imports for '$localName' in ${file.path}: " +
 						listOf(previous, symbol).sortedBy { normalizedPathText(it.declarationPath) }
 							.joinToString { "${displayPackage(it.packageId)}::${it.sourceName} at ${it.declarationPath}" },
+					importNode,
 				)
 			}
 		}
@@ -181,6 +204,7 @@ object CrescentModuleResolver {
 				fail(
 					"Ambiguous wildcard import '$name' in ${file.path}: " +
 						distinct.joinToString { "${displayPackage(it.packageId)}::${it.sourceName} at ${it.declarationPath}" },
+					file,
 				)
 			}
 			if (distinct.isNotEmpty()) resolved[name] = distinct.single()
@@ -199,17 +223,17 @@ object CrescentModuleResolver {
 		inner: CrescentToken.Visibility,
 	): CrescentToken.Visibility = if (outer.ordinal < inner.ordinal) outer else inner
 
-	private fun validatePackageId(packageId: String, path: Path) {
+	private fun validatePackageId(packageId: String, path: Path, file: Node.File) {
 		if (packageId.isEmpty()) return
 		val invalid = packageId.split('.').firstOrNull { !isIdentifier(it) }
-		if (invalid != null) fail("Invalid package segment '$invalid' derived for source $path")
+		if (invalid != null) fail("Invalid package segment '$invalid' derived for source $path", file)
 	}
 
-	private fun packageId(relativeParent: Path?, source: Path): String {
+	private fun packageId(relativeParent: Path?, source: Path, file: Node.File): String {
 		if (relativeParent == null) return ""
 		val segments = relativeParent.map { it.toString() }
 		val invalid = segments.firstOrNull { !isIdentifier(it) }
-		if (invalid != null) fail("Invalid package directory '$invalid' for source $source")
+		if (invalid != null) fail("Invalid package directory '$invalid' for source $source", file)
 		return segments.joinToString(".")
 	}
 
@@ -222,8 +246,8 @@ object CrescentModuleResolver {
 
 	private fun snapshot(file: Node.File): Node.File {
 		val functions = immutable(file.functions.mapValues { snapshotFunction(it.value) })
-		return file.copy(
-			imports = immutableList(file.imports.map { it.copy() }),
+		return SourceLocations.copy(file, file.copy(
+			imports = immutableList(file.imports.map { SourceLocations.copy(it, it.copy()) }),
 			structs = immutable(file.structs.mapValues { snapshotStruct(it.value) }),
 			sealeds = immutable(file.sealeds.mapValues { snapshotSealed(it.value) }),
 			impls = immutable(file.impls.mapValues { snapshotImpl(it.value) }),
@@ -236,94 +260,95 @@ object CrescentModuleResolver {
 			functions = functions,
 			mainFunction = file.mainFunction?.let { functions[it.name] ?: snapshotFunction(it) },
 			importedSymbols = immutable(file.importedSymbols.mapValues { it.value.copy() }),
-		)
+		))
 	}
 
-	private fun snapshotStruct(struct: Node.Struct): Node.Struct = struct.copy(
+	private fun snapshotStruct(struct: Node.Struct): Node.Struct = SourceLocations.copy(struct, struct.copy(
 		variables = immutableList(struct.variables.map(::snapshotBasicVariable)),
-	)
+	))
 
-	private fun snapshotSealed(sealed: Node.Sealed): Node.Sealed = sealed.copy(
+	private fun snapshotSealed(sealed: Node.Sealed): Node.Sealed = SourceLocations.copy(sealed, sealed.copy(
 		structs = immutableList(sealed.structs.map(::snapshotStruct)),
 		objects = immutableList(sealed.objects.map(::snapshotObject)),
-	)
+	))
 
-	private fun snapshotTrait(trait: Node.Trait): Node.Trait = trait.copy(
+	private fun snapshotTrait(trait: Node.Trait): Node.Trait = SourceLocations.copy(trait, trait.copy(
 		functionTraits = immutableList(trait.functionTraits.map(::snapshotFunctionTrait)),
-	)
+	))
 
-	private fun snapshotObject(objectNode: Node.Object): Node.Object = objectNode.copy(
+	private fun snapshotObject(objectNode: Node.Object): Node.Object = SourceLocations.copy(objectNode, objectNode.copy(
 		variables = immutable(objectNode.variables.mapValues { snapshotBasicVariable(it.value) }),
 		constants = immutable(objectNode.constants.mapValues { snapshotConstant(it.value) }),
 		functions = immutable(objectNode.functions.mapValues { snapshotFunction(it.value) }),
-	)
+	))
 
-	private fun snapshotImpl(impl: Node.Impl): Node.Impl = impl.copy(
+	private fun snapshotImpl(impl: Node.Impl): Node.Impl = SourceLocations.copy(impl, impl.copy(
 		type = snapshotType(impl.type),
 		modifiers = immutableList(impl.modifiers),
 		extends = immutableList(impl.extends.map(::snapshotType)),
 		functions = immutableList(impl.functions.map(::snapshotFunction)),
-	)
+	))
 
-	private fun snapshotEnum(enumNode: Node.Enum): Node.Enum = enumNode.copy(
+	private fun snapshotEnum(enumNode: Node.Enum): Node.Enum = SourceLocations.copy(enumNode, enumNode.copy(
 		parameters = immutableList(enumNode.parameters.map(::snapshotParameter)),
 		structs = immutableList(enumNode.structs.map(::snapshotEnumEntry)),
-	)
+	))
 
-	private fun snapshotEnumEntry(entry: Node.EnumEntry): Node.EnumEntry = entry.copy(
+	private fun snapshotEnumEntry(entry: Node.EnumEntry): Node.EnumEntry = SourceLocations.copy(entry, entry.copy(
 		arguments = immutableList(entry.arguments.map(::snapshotNode)),
-	)
+	))
 
-	private fun snapshotFunctionTrait(functionTrait: Node.FunctionTrait): Node.FunctionTrait = functionTrait.copy(
+	private fun snapshotFunctionTrait(functionTrait: Node.FunctionTrait): Node.FunctionTrait = SourceLocations.copy(functionTrait, functionTrait.copy(
 		params = immutableList(functionTrait.params.map(::snapshotParameter)),
 		returnType = snapshotType(functionTrait.returnType),
-	)
+	))
 
-	private fun snapshotBasicVariable(variable: Node.Variable.Basic): Node.Variable.Basic = variable.copy(
+	private fun snapshotBasicVariable(variable: Node.Variable.Basic): Node.Variable.Basic = SourceLocations.copy(variable, variable.copy(
 		type = snapshotType(variable.type),
 		value = snapshotNode(variable.value),
-	)
+	))
 
-	private fun snapshotConstant(variable: Node.Variable.Constant): Node.Variable.Constant = variable.copy(
+	private fun snapshotConstant(variable: Node.Variable.Constant): Node.Variable.Constant = SourceLocations.copy(variable, variable.copy(
 		type = snapshotType(variable.type),
 		value = snapshotNode(variable.value),
-	)
+	))
 
-	private fun snapshotLocal(variable: Node.Variable.Local): Node.Variable.Local = variable.copy(
+	private fun snapshotLocal(variable: Node.Variable.Local): Node.Variable.Local = SourceLocations.copy(variable, variable.copy(
 		type = snapshotType(variable.type),
 		value = snapshotNode(variable.value),
-	)
+	))
 
-	private fun snapshotFunction(function: Node.Function): Node.Function = function.copy(
+	private fun snapshotFunction(function: Node.Function): Node.Function = SourceLocations.copy(function, function.copy(
 		modifiers = immutableList(function.modifiers),
 		params = immutableList(function.params.map(::snapshotParameter)),
 		returnType = snapshotType(function.returnType),
 		innerCode = snapshotBlock(function.innerCode),
-	)
+	))
 
-	private fun snapshotParameter(parameter: Node.Parameter): Node.Parameter = when (parameter) {
+	private fun snapshotParameter(parameter: Node.Parameter): Node.Parameter = SourceLocations.copy(parameter, when (parameter) {
 		is Node.Parameter.Basic -> parameter.copy(type = snapshotType(parameter.type))
 		is Node.Parameter.WithDefault -> parameter.copy(
 			type = snapshotType(parameter.type),
 			defaultValue = snapshotExpression(parameter.defaultValue),
 		)
-	}
+	})
 
-	private fun snapshotType(type: Node.Type): Node.Type = when (type) {
+	private fun snapshotType(type: Node.Type): Node.Type = SourceLocations.copy(type, when (type) {
 		Node.Type.Implicit -> type
 		is Node.Type.Basic -> Node.Type.Basic(type.name)
 		is Node.Type.Array -> Node.Type.Array(snapshotType(type.type))
 		is Node.Type.Result -> Node.Type.Result(snapshotType(type.type))
 		else -> type
-	}
+	})
 
 	private fun snapshotExpression(expression: Node.Expression): Node.Expression =
-		Node.Expression(immutableList(expression.nodes.map(::snapshotNode)))
+		SourceLocations.copy(expression, Node.Expression(immutableList(expression.nodes.map(::snapshotNode))))
 
 	private fun snapshotBlock(block: Node.Statement.Block): Node.Statement.Block =
-		Node.Statement.Block(immutableList(block.nodes.map(::snapshotNode)))
+		SourceLocations.copy(block, Node.Statement.Block(immutableList(block.nodes.map(::snapshotNode))))
 
-	private fun snapshotNode(node: Node): Node = when (node) {
+	private fun snapshotNode(node: Node): Node {
+		val snapshot = when (node) {
 		is Node.GetCall -> node.copy(arguments = immutableList(node.arguments.map(::snapshotNode)))
 		is Node.IdentifierCall -> node.copy(arguments = immutableList(node.arguments.map(::snapshotNode)))
 		is Node.TypeLiteral -> Node.TypeLiteral(snapshotType(node.type))
@@ -382,7 +407,9 @@ object CrescentModuleResolver {
 		is Node.Statement.Block -> snapshotBlock(node)
 		is Node.Statement.Range -> node.copy(start = snapshotNode(node.start), end = snapshotNode(node.end))
 		is Node.Array -> Node.Array(kotlin.Array(node.values.size) { index -> snapshotNode(node.values[index]) })
-		else -> node
+			else -> node
+		}
+		return if (snapshot === node) node else SourceLocations.copy(node, snapshot)
 	}
 
 	private fun normalizedPathText(path: Path): String = path.normalize().toString().replace('\\', '/')
@@ -395,7 +422,10 @@ object CrescentModuleResolver {
 		append(" at ").append(symbol.declarationPath)
 	}
 
-	private fun fail(message: String): Nothing = throw CrescentModuleResolutionException(message)
+	private fun fail(message: String, source: Any? = null): Nothing {
+		val span = SourceLocations.spanOf(source)
+		throw if (span == null) CrescentModuleResolutionException(message) else CrescentModuleResolutionException(span, message)
+	}
 
 	private fun <K, V> immutable(values: Map<K, V>): Map<K, V> =
 		Collections.unmodifiableMap(LinkedHashMap(values))

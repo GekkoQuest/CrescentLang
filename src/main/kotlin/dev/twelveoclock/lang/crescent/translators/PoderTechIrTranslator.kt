@@ -2,11 +2,14 @@ package dev.twelveoclock.lang.crescent.translators
 
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node
 import dev.twelveoclock.lang.crescent.language.token.CrescentToken
+import dev.twelveoclock.lang.crescent.diagnostics.SourceLocations
 import java.nio.file.Path
 import kotlin.io.path.nameWithoutExtension
 
 /** A dependency-free structural PoderTechIR representation. */
 data class PoderTechIrProgram(val modules: List<PoderTechIrModule>)
+
+data class PoderTechIrSourceIdentity(val packageId: String, val sourcePath: Path?)
 
 data class PoderTechIrModule(
 	val name: String,
@@ -24,6 +27,9 @@ data class PoderTechIrModule(
 	val sealedTypes: List<PoderTechIrSealed> = emptyList(),
 	val implementations: List<PoderTechIrImplementation> = emptyList(),
 )
+
+val PoderTechIrModule.sourceIdentity: PoderTechIrSourceIdentity
+	get() = PoderTechIrSourceIdentity(packageId, sourcePath?.toAbsolutePath()?.normalize())
 
 enum class PoderTechIrVisibility { PRIVATE, INTERNAL, PUBLIC }
 enum class PoderTechIrModifier { ASYNC, OVERRIDE, OPERATOR, INLINE, STATIC, INFIX }
@@ -264,7 +270,7 @@ object PoderTechIrTranslator {
 		else -> unsupported("type", type)
 	}
 
-	private fun translateNode(node: Node): PoderTechIrNode = when (node) {
+	private fun translateNode(node: Node): PoderTechIrNode = SourceLocations.copy(node, when (node) {
 		is Node.Primitive.String -> PoderTechIrNode.Literal("String", node.data)
 		is Node.Primitive.Char -> PoderTechIrNode.Literal("Char", node.data)
 		is Node.Primitive.Boolean -> PoderTechIrNode.Literal("Boolean", node.data)
@@ -291,11 +297,11 @@ object PoderTechIrTranslator {
 		CrescentToken.Keyword.BREAK -> PoderTechIrNode.Break
 		CrescentToken.Keyword.CONTINUE -> PoderTechIrNode.Continue
 		else -> unsupported("AST node", node)
-	}
+	})
 
-	private fun translateExpression(node: Node.Expression) = PoderTechIrNode.Expression(node.nodes.map(::translateNode))
-	private fun translateBlock(node: Node.Statement.Block) = PoderTechIrNode.Block(node.nodes.map(::translateNode))
-	private fun translateRange(node: Node.Statement.Range) = PoderTechIrNode.Range(translateNode(node.start), translateNode(node.end))
+	private fun translateExpression(node: Node.Expression) = SourceLocations.copy(node, PoderTechIrNode.Expression(node.nodes.map(::translateNode)))
+	private fun translateBlock(node: Node.Statement.Block) = SourceLocations.copy(node, PoderTechIrNode.Block(node.nodes.map(::translateNode)))
+	private fun translateRange(node: Node.Statement.Range) = SourceLocations.copy(node, PoderTechIrNode.Range(translateNode(node.start), translateNode(node.end)))
 
 	private fun lower(node: Node): List<PoderTechIrInstruction> = when (node) {
 		is Node.Primitive.String -> listOf(PoderTechIrInstruction.Push(node.data)); is Node.Primitive.Char -> listOf(PoderTechIrInstruction.Push(node.data)); is Node.Primitive.Boolean -> listOf(PoderTechIrInstruction.Push(node.data)); is Node.Primitive.Number -> listOf(PoderTechIrInstruction.Push(node.toKotlinNumber()))

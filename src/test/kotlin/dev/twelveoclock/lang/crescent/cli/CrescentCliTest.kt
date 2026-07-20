@@ -26,6 +26,7 @@ class CrescentCliTest {
 
 		assertEquals(0, exitCode)
 		assertTrue(output.toString().contains("crescent <file-or-directory>"))
+		assertTrue(output.toString().contains("crescent ptir-run <file-or-directory>"))
 		assertEquals("", errors.toString())
 	}
 
@@ -74,7 +75,25 @@ class CrescentCliTest {
 	}
 
 	@Test
-	fun `invalid source is a program failure without a usage hint`() {
+	fun `ptir run executes independently and forwards program arguments`() {
+		val source = tempDirectory.resolve("args.moo")
+		source.writeText("fun main(args: [String]) { println(args[1]) }")
+		val output = ByteArrayOutputStream()
+		val errors = ByteArrayOutputStream()
+
+		val exitCode = CrescentCli.run(
+			arrayOf("ptir-run", source.toString(), "--", "new", "moon"),
+			out = PrintStream(output),
+			err = PrintStream(errors),
+		)
+
+		assertEquals(0, exitCode)
+		assertEquals("moon${System.lineSeparator()}", output.toString())
+		assertEquals("", errors.toString())
+	}
+
+	@Test
+	fun `invalid source preserves one canonical diagnostic without a usage hint`() {
 		val source = tempDirectory.resolve("broken.moo")
 		source.writeText("fun 123 {}")
 		val errors = ByteArrayOutputStream()
@@ -82,8 +101,29 @@ class CrescentCliTest {
 		val exitCode = CrescentCli.run(arrayOf(source.toString()), err = PrintStream(errors))
 
 		assertEquals(1, exitCode)
-		assertTrue(errors.toString().startsWith("error: Could not parse"))
-		assertTrue("--help" !in errors.toString())
+		val rendered = errors.toString().trim()
+		val sourceId = source.toAbsolutePath().normalize().toString().replace('\\', '/')
+		assertTrue(rendered.startsWith("$sourceId:1:5-1:8: error:"), rendered)
+		assertEquals(1, Regex("error:").findAll(rendered).count(), rendered)
+		assertTrue("--help" !in rendered)
+	}
+
+	@Test
+	fun `Kotlin translation diagnostics retain the input path`() {
+		val source = tempDirectory.resolve("broken.kt")
+		source.writeText("fun bad(value: String?) {}")
+		val errors = ByteArrayOutputStream()
+
+		val exitCode = CrescentCli.run(
+			arrayOf("kotlin-to-crescent", source.toString()),
+			err = PrintStream(errors),
+		)
+
+		assertEquals(1, exitCode)
+		val rendered = errors.toString().trim()
+		val sourceId = source.toAbsolutePath().normalize().toString().replace('\\', '/')
+		assertTrue(rendered.startsWith("$sourceId:1:22-1:23: error:"), rendered)
+		assertEquals(1, Regex("error:").findAll(rendered).count(), rendered)
 	}
 
 	@Test
@@ -126,8 +166,12 @@ class CrescentCliTest {
 		val exitCode = CrescentCli.run(arrayOf(source.toString()), err = PrintStream(errors))
 
 		assertEquals(1, exitCode)
-		assertTrue(errors.toString().startsWith("error:"))
-		assertTrue("--help" !in errors.toString())
+		val rendered = errors.toString().trim()
+		val sourceId = source.toAbsolutePath().normalize().toString().replace('\\', '/')
+		assertTrue(rendered.startsWith("$sourceId:"), rendered)
+		assertTrue(": error:" in rendered, rendered)
+		assertEquals(1, Regex("error:").findAll(rendered).count(), rendered)
+		assertTrue("--help" !in rendered)
 	}
 
 }

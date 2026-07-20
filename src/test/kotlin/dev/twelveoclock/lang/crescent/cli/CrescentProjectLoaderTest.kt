@@ -1,6 +1,9 @@
 package dev.twelveoclock.lang.crescent.cli
 
+import dev.twelveoclock.lang.crescent.compiler.CrescentIRCompiler
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticException
 import dev.twelveoclock.lang.crescent.utils.collectSystemOut
+import dev.twelveoclock.lang.crescent.vm.CrescentIRVM
 import dev.twelveoclock.lang.crescent.vm.CrescentVM
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -120,6 +123,84 @@ class CrescentProjectLoaderTest {
 	}
 
 	@Test
+	fun `executes every concrete standard library function identically when direct and lowered`() {
+		val main = tempDirectory.resolve("main.moo")
+		main.writeText(
+			"""
+				import crescent.std.core::identity
+				import crescent.std.core::choose
+				import crescent.std.math::minI32
+				import crescent.std.math::maxI32
+				import crescent.std.math::clamp
+				import crescent.std.math::absoluteI32
+				import crescent.std.math::signI32
+				import crescent.std.math::isEvenI32
+				import crescent.std.math::isOddI32
+				import crescent.std.collections::singletonI32
+				import crescent.std.collections::pairI32
+				import crescent.std.collections::sameI32
+				import crescent.std.collections::swapPairI32
+				import crescent.std.collections::sumPairI32
+				import crescent.std.text::concatText
+				import crescent.std.text::isEmptyText
+				import crescent.std.text::repeatText
+				import crescent.std.text::surroundText
+				fun main {
+					println(identity("moon"))
+					println(choose(true, "left", "right"))
+					println(minI32(5, 2))
+					println(maxI32(5, 2))
+					println(clamp(12, 0, 10))
+					println(absoluteI32(-7))
+					println(absoluteI32((-2147483648) as I32))
+					println(signI32(-7))
+					println(isEvenI32(4))
+					println(isOddI32(5))
+					println(singletonI32(7))
+					println(pairI32(2, 3))
+					println(sameI32([1, 2], [1, 2]))
+					println(swapPairI32([2, 3]))
+					println(sumPairI32([2, 3]))
+					println(concatText("crescent", "lang"))
+					println(isEmptyText(""))
+					println(repeatText("na", 3))
+					println(surroundText("core", "[", "]"))
+				}
+			""".trimIndent(),
+		)
+		val project = CrescentProjectLoader.load(tempDirectory)
+		val expected = """
+			moon
+			left
+			2
+			5
+			10
+			7
+			-2147483648
+			-1
+			true
+			true
+			[7]
+			[2, 3]
+			true
+			[3, 2]
+			5
+			crescentlang
+			true
+			nanana
+			[core]
+		""".trimIndent() + "\n"
+
+		val direct = collectSystemOut { CrescentVM(project.files, project.mainFile).use { it.invoke() } }
+		val lowered = collectSystemOut {
+			CrescentIRVM(CrescentIRCompiler.invoke(project.files, project.mainFile)).use { it.invoke() }
+		}
+
+		assertEquals(expected, direct)
+		assertEquals(expected, lowered)
+	}
+
+	@Test
 	fun `distinguishes missing and duplicate main functions`() {
 		val first = tempDirectory.resolve("first.moo")
 		first.writeText("fun helper {}")
@@ -142,7 +223,8 @@ class CrescentProjectLoaderTest {
 		val broken = tempDirectory.resolve("broken.moo")
 		Files.writeString(broken, "fun 123 {}")
 
-		val error = assertFailsWith<CliExecutionException> { CrescentProjectLoader.load(broken) }
-		assertTrue(error.message.orEmpty().startsWith("Could not parse ${broken.toAbsolutePath().normalize()}:"))
+		val error = assertFailsWith<DiagnosticException> { CrescentProjectLoader.load(broken) }
+		val sourceId = broken.toAbsolutePath().normalize().toString().replace('\\', '/')
+		assertTrue(error.message.orEmpty().startsWith("$sourceId:1:5-1:8: error:"), error.message)
 	}
 }
