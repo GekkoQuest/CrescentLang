@@ -1,5 +1,6 @@
 package dev.twelveoclock.lang.crescent.language.ir
 
+import dev.twelveoclock.lang.crescent.diagnostics.SourceLocations
 /**
  * Executable Crescent program after linking and lowering.
  *
@@ -483,9 +484,10 @@ private fun SourceUnitIR.snapshot() = copy(
 
 private fun ParameterIR.snapshot() = copy(defaultValue = defaultValue?.snapshot())
 private fun FieldIR.snapshot() = copy(initializer = initializer?.snapshot())
-private fun FunctionIR.snapshot() = copy(modifiers = modifiers.toSet(), parameters = parameters.map(ParameterIR::snapshot), body = body.snapshot())
-private fun IRBlock.snapshot() = copy(statements = statements.map(IRStatement::snapshot))
-private fun IRStatement.snapshot(): IRStatement = when (this) {
+private fun FunctionIR.snapshot() = SourceLocations.copy(this, copy(modifiers = modifiers.toSet(), parameters = parameters.map(ParameterIR::snapshot), body = body.snapshot()))
+private fun IRBlock.snapshot() = SourceLocations.copy(this, copy(statements = statements.map(IRStatement::snapshot)))
+private fun IRStatement.snapshot(): IRStatement {
+	val snapshot = when (this) {
 	is IRStatement.Evaluate -> copy(expression = expression.snapshot())
 	is IRStatement.Declare -> copy(initializer = initializer.snapshot())
 	is IRStatement.Return -> copy(value = value?.snapshot())
@@ -497,7 +499,9 @@ private fun IRStatement.snapshot(): IRStatement = when (this) {
 		body = clause.body.snapshot(),
 	) })
 	IRStatement.Break, IRStatement.Continue -> this
-	is IRStatement.NestedBlock -> copy(block = block.snapshot())
+		is IRStatement.NestedBlock -> copy(block = block.snapshot())
+	}
+	return if (snapshot === this) this else SourceLocations.copy(this, snapshot)
 }
 private fun AssignmentTargetIR.snapshot(): AssignmentTargetIR = when (this) {
 	is AssignmentTargetIR.Variable -> this
@@ -508,7 +512,8 @@ private fun CallTargetIR.snapshot(): CallTargetIR = when (this) {
 	is CallTargetIR.Builtin, is CallTargetIR.Function, is CallTargetIR.Constructor -> this
 	is CallTargetIR.Member -> copy(receiver = receiver.snapshot())
 }
-private fun IRExpression.snapshot(): IRExpression = when (this) {
+private fun IRExpression.snapshot(): IRExpression {
+	val snapshot = when (this) {
 	IRExpression.This, is IRExpression.Literal, is IRExpression.Variable, is IRExpression.TypeValue -> this
 	is IRExpression.Array -> copy(elements = elements.map(IRExpression::snapshot))
 	is IRExpression.Call -> copy(target = target.snapshot(), arguments = arguments.map(IRExpression::snapshot))
@@ -523,5 +528,7 @@ private fun IRExpression.snapshot(): IRExpression = when (this) {
 	is IRExpression.Cast -> copy(value = value.snapshot())
 	is IRExpression.TypeTest -> copy(value = value.snapshot())
 	is IRExpression.PropagateResult -> copy(value = value.snapshot())
-	is IRExpression.Conditional -> copy(statement = statement.snapshot() as IRStatement.If)
+		is IRExpression.Conditional -> copy(statement = statement.snapshot() as IRStatement.If)
+	}
+	return if (snapshot === this) this else SourceLocations.copy(this, snapshot)
 }

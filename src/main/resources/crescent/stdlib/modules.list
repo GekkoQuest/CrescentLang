@@ -1,3 +1,5 @@
 # package ID=classpath resource
 crescent.std.core=crescent/stdlib/core.moo
+crescent.std.collections=crescent/stdlib/collections.moo
 crescent.std.math=crescent/stdlib/math.moo
+crescent.std.text=crescent/stdlib/text.moo

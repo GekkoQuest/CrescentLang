@@ -5,7 +5,13 @@ import java.math.BigInteger
 
 internal class KotlinSubsetParser(source: String) {
 	private enum class Kind { WORD, NUMBER, STRING, CHAR, COMMENT, SYMBOL, NEWLINE, EOF }
-	private data class Token(val kind: Kind, val text: String, val offset: Int)
+	private data class Token(val kind: Kind, val text: String, val offset: Int, val endOffset: Int = offset + text.length) {
+		fun subspan(start: Int, end: Int = start + 1): Token {
+			val boundedStart = start.coerceIn(0, text.length)
+			val boundedEnd = end.coerceIn(boundedStart, text.length)
+			return copy(text = text.substring(boundedStart, boundedEnd), offset = offset + boundedStart, endOffset = offset + boundedEnd)
+		}
+	}
 	private data class AnnotationPrefix(val marker: Token, val rendered: String)
 	private data class Prefix(val visibilityToken: Token?, val modifierTokens: List<Token>, val annotationPrefixes: List<AnnotationPrefix>) {
 		val visibility: String? get() = visibilityToken?.text
@@ -72,7 +78,9 @@ internal class KotlinSubsetParser(source: String) {
 			"interface" -> parseInterface(prefix)
 			"object" -> parseObject(prefix)
 			"val", "var", "const" -> parseState(prefix)
-			"enum", "annotation", "value", "typealias" -> impossible(peek(), "${peek().text} declarations")
+			"enum" -> parseEnum(prefix)
+			"sealed" -> parseSealed(prefix)
+			"annotation", "value", "typealias" -> impossible(peek(), "${peek().text} declarations")
 			else -> fail(peek(), "Expected a Kotlin declaration, got '${peek().text}'")
 		}
 	}
@@ -289,6 +297,133 @@ internal class KotlinSubsetParser(source: String) {
 		return "$visibility" + "object $name {\n${members.joinToString("\n").prependIndent("    ")}\n}"
 	}
 
+	private fun parseEnum(prefix: Prefix): String {
+		val enumToken = expect("enum")
+		expect("class")
+		prefix.modifierTokens.firstOrNull { it.text !in setOf("final") }?.let { impossible(it, "modifier on enum declaration") }
+		val name = expectWord("enum name").text
+		val parameters = parseEnumParameters()
+		skipNewlines()
+		if (match(":")) impossible(previous(), "enum interface implementation")
+		expect("{")
+		val entries = mutableListOf<String>()
+		val methods = mutableListOf<String>()
+		var inBody = false
+		while (true) {
+			skipNewlines()
+			while (peek().kind == Kind.COMMENT) { next(); skipNewlines() }
+			if (match("}")) break
+			if (match(";")) { inBody = true; continue }
+			if (inBody) {
+				val memberPrefix = parsePrefix()
+				if (peek().text != "fun") impossible(peek(), "enum state or nested declaration")
+				methods += parseFunction(memberPrefix, false).source
+				continue
+			}
+			if (peek().text == "@") impossible(peek(), "annotation on enum entry")
+			val entry = expectWord("enum entry name")
+			val arguments = if (peek().text == "(") {
+				val balanced = readBalanced("(", ")")
+				"(${renderTokens(balanced.drop(1).dropLast(1))})"
+			} else ""
+			if (peek().text == "{") impossible(peek(), "enum-entry anonymous class body")
+			entries += entry.text + arguments
+			when {
+				match(",") -> Unit
+				peek().text == ";" -> { next(); inBody = true }
+				peek().text == "}" -> Unit
+				peek().kind != Kind.NEWLINE -> fail(peek(), "Expected ',', ';', or '}' after enum entry")
+			}
+		}
+		if (entries.isEmpty()) fail(enumToken, "Kotlin enum must declare at least one entry")
+		val visibility = prefix.visibility?.let { "$it " }.orEmpty()
+		val provenance = prefix.annotations.map { "# Non-semantic Kotlin annotation provenance: $it" }
+		val declaration = "$visibility" + "enum $name(${parameters.joinToString(", ")}) { ${entries.joinToString(" ")} }"
+		val implementation = methods.takeIf { it.isNotEmpty() }?.let { "impl $name {\n${it.joinToString("\n").prependIndent("    ")}\n}" }
+		return (provenance + listOfNotNull(declaration, implementation)).joinToString("\n\n")
+	}
+
+	private fun parseEnumParameters(): List<String> {
+		if (!match("(")) return emptyList()
+		val parameters = mutableListOf<String>()
+		while (true) {
+			skipNewlines()
+			if (match(")")) break
+			val prefix = parsePrefix()
+			prefix.firstPrefixToken()?.let { impossible(it, "visibility, modifier, or annotation on enum property") }
+			if (!match("val")) {
+				if (match("var")) impossible(previous(), "mutable enum constructor property")
+				impossible(peek(), "non-property enum constructor parameter")
+			}
+			val name = expectWord("enum property name").text
+			expect(":")
+			val type = parseType()
+			val default = if (match("=")) " = ${renderExpressionUntil(setOf(",", ")"))}" else ""
+			parameters += "$name: $type$default"
+			if (!match(",")) { expect(")"); break }
+		}
+		return parameters
+	}
+
+	private fun parseSealed(prefix: Prefix): String {
+		val sealedToken = expect("sealed")
+		if (!match("class")) impossible(peek(), "sealed interface semantics")
+		prefix.modifierTokens.firstOrNull { it.text !in setOf("abstract") }?.let { impossible(it, "modifier on sealed class") }
+		val name = expectWord("sealed class name").text
+		if (peek().text == "(") {
+			val constructor = readBalanced("(", ")")
+			if (constructor.size != 2) impossible(constructor.first(), "stateful sealed base constructor")
+		}
+		if (match(":")) impossible(previous(), "sealed base inheritance")
+		skipNewlines()
+		expect("{")
+		val members = mutableListOf<String>()
+		while (true) {
+			skipNewlines()
+			if (peek().kind == Kind.COMMENT) { next(); continue }
+			if (match("}")) break
+			val memberPrefix = parsePrefix()
+			val memberVisibility = memberPrefix.visibility?.let { "$it " }.orEmpty()
+			memberPrefix.annotationPrefixes.firstOrNull()?.let { impossible(it.marker, "annotation on sealed variant") }
+			memberPrefix.modifierTokens.firstOrNull { it.text !in setOf("final") }?.let { impossible(it, "modifier on sealed variant") }
+			when (peek().text) {
+				"class" -> {
+					next()
+					val variant = expectWord("sealed class variant name").text
+					val fields = parseConstructorProperties()
+					skipNewlines(); expect(":")
+					val base = expectWord("sealed base name")
+					if (base.text != name) fail(base, "Sealed variant '$variant' must directly extend '$name'")
+					val call = readBalanced("(", ")")
+					if (call.size != 2) impossible(call.first(), "arguments to sealed base constructor")
+					skipNewlines()
+					if (peek().text == "{") {
+						val body = readBalanced("{", "}")
+						if (body.size != 2) impossible(body.first(), "sealed variant class body")
+					}
+					members += "$memberVisibility" + "struct $variant(${fields.joinToString(", ")})"
+				}
+				"object" -> {
+					next()
+					val variant = expectWord("sealed object variant name").text
+					skipNewlines(); expect(":")
+					val base = expectWord("sealed base name")
+					if (base.text != name) fail(base, "Sealed object '$variant' must directly extend '$name'")
+					val call = readBalanced("(", ")")
+					if (call.size != 2) impossible(call.first(), "arguments to sealed base constructor")
+					skipNewlines()
+					val body = readBalanced("{", "}")
+					if (body.drop(1).dropLast(1).any { it.kind !in setOf(Kind.NEWLINE, Kind.COMMENT) }) impossible(body.first(), "sealed object variant body")
+					members += "$memberVisibility" + "object $variant {}"
+				}
+				else -> impossible(peek(), "sealed member other than a direct class or object variant")
+			}
+		}
+		if (members.isEmpty()) fail(sealedToken, "Kotlin sealed class must declare at least one directly translatable variant")
+		val visibility = prefix.visibility?.let { "$it " }.orEmpty()
+		return "$visibility" + "sealed $name {\n${members.joinToString("\n").prependIndent("    ")}\n}"
+	}
+
 	private fun parseState(prefix: Prefix): String {
 		prefix.modifierTokens.firstOrNull()?.let { impossible(it, "modifier on state declaration") }
 		val constant = match("const")
@@ -322,6 +457,7 @@ internal class KotlinSubsetParser(source: String) {
 					output.append(parseState(prefix)).append('\n'); lineStart = true
 				}
 				token.text == "if" -> { if (!lineStart) output.append(' '); output.append(parseIf()); lineStart = false }
+				token.text == "when" -> { if (!lineStart) output.append(' '); output.append(parseWhen()); lineStart = false }
 				token.text == "while" -> { if (!lineStart) output.append(' '); output.append(parseWhile()); lineStart = false }
 				token.text == "for" -> { if (!lineStart) output.append(' '); output.append(parseFor()); lineStart = false }
 				token.text == "fun" -> impossible(token, "local functions")
@@ -372,14 +508,85 @@ internal class KotlinSubsetParser(source: String) {
 		return "while $renderedPredicate ${parseControlBody()}"
 	}
 
+	private fun parseWhen(): String {
+		val start = expect("when")
+		skipNewlines()
+		val subject = if (peek().text == "(") {
+			val balanced = readBalanced("(", ")").drop(1).dropLast(1).filter { it.kind != Kind.NEWLINE }
+			if (balanced.isEmpty()) null else {
+				val withoutVal = if (balanced.first().text == "val") balanced.drop(1) else balanced
+				if (withoutVal.firstOrNull()?.text == "var") impossible(withoutVal.first(), "mutable named when subject")
+				renderTokens(withoutVal)
+			}
+		} else null
+		skipNewlines()
+		expect("{")
+		val clauses = mutableListOf<String>()
+		var hasElse = false
+		while (true) {
+			skipNewlines()
+			while (peek().kind == Kind.COMMENT) { next(); skipNewlines() }
+			if (match("}")) break
+			if (hasElse) fail(peek(), "Kotlin when else branch must be last")
+			val conditions = mutableListOf<Token>()
+			var round = 0
+			var square = 0
+			while (!atEnd()) {
+				val token = peek()
+				if (round == 0 && square == 0 && token.text == "->") break
+				when (token.text) { "(" -> round++; ")" -> round--; "[" -> square++; "]" -> square-- }
+				conditions += next()
+			}
+			if (!match("->")) fail(start, "Unterminated Kotlin when branch; expected '->'")
+			val conditionGroups = splitTopLevel(conditions.filter { it.kind != Kind.NEWLINE }, ",")
+			if (conditionGroups.isEmpty() || conditionGroups.any(List<Token>::isEmpty)) fail(start, "Kotlin when branch requires a condition")
+			val renderedConditions = conditionGroups.map { group ->
+				if (group.size == 1 && group.single().text == "else") {
+					hasElse = true
+					"else"
+				} else {
+					group.firstOrNull { it.text in setOf("in", "!in", "is", "!is") }?.let {
+						impossible(it, "Kotlin when membership/type-test condition")
+					}
+					renderTokens(group)
+				}
+			}
+			if (hasElse && renderedConditions.size != 1) impossible(conditions.first(), "else mixed with other Kotlin when conditions")
+			skipNewlines()
+			val branch = when {
+				peek().text == "{" -> parseBlock()
+				peek().text == "when" -> parseWhen()
+				peek().text == "return" -> {
+					val returnToken = next()
+					if (peek().text == "@") impossible(peek(), "labeled return")
+					val value = renderExpressionUntil(setOf("\n", ";", "}"))
+					if (value.isBlank()) impossible(returnToken, "bare return")
+					"{ -> $value }"
+				}
+				else -> renderExpressionUntil(setOf("\n", ";", "}"))
+			}
+			if (branch.isBlank()) fail(peek(), "Kotlin when branch requires a body")
+			renderedConditions.forEach { condition ->
+				// Crescent requires an else body to be a block; Kotlin permits a bare expression.
+				val renderedBranch = if (condition == "else" && !branch.trimStart().startsWith("{")) "{ $branch }" else branch
+				clauses += "$condition -> $renderedBranch"
+			}
+			consumeOptional(";")
+		}
+		if (clauses.isEmpty()) fail(start, "Kotlin when requires at least one branch")
+		val renderedSubject = subject ?: "true"
+		return "when($renderedSubject) {\n${clauses.joinToString("\n").prependIndent("    ")}\n}"
+	}
+
 	private fun parseControlBody(): String {
 		skipNewlines()
 		if (peek().text == "{") return parseBlock()
 		val start = peek()
 		val statement = when (start.text) {
 			"if" -> parseIf()
+			"when" -> parseWhen()
 			"while" -> parseWhile()
-			"for" -> impossible(start, "unbraced for-loop body")
+			"for" -> parseFor()
 			"return" -> {
 				next()
 				if (peek().text == "@") impossible(peek(), "labeled return")
@@ -428,7 +635,7 @@ internal class KotlinSubsetParser(source: String) {
 		if (header.none { it.text == "in" } || header.none { it.text == ".." }) impossible(start, "collection iteration that is not an inclusive range")
 		val rendered = renderTokens(header)
 		skipNewlines()
-		return "for $rendered ${parseBlock()}"
+		return "for $rendered ${parseControlBody()}"
 	}
 
 	private fun parseType(): String {
@@ -460,6 +667,7 @@ internal class KotlinSubsetParser(source: String) {
 	}
 
 	private fun renderExpressionUntil(stops: Set<String>): String {
+		if (peek().text == "when") return parseWhen()
 		val selected = mutableListOf<Token>()
 		var parens = 0; var brackets = 0; var braces = 0
 		while (!atEnd()) {
@@ -480,7 +688,6 @@ internal class KotlinSubsetParser(source: String) {
 			"?:" -> impossible(token, "Elvis operator")
 			"!!" -> impossible(token, "non-null assertion")
 			"::" -> impossible(token, "function reference")
-			"===", "!==" -> impossible(token, "Kotlin referential equality")
 			"..<", "until" -> impossible(token, "half-open range expression")
 			"downTo", "step" -> impossible(token, "stepped or descending range expression")
 			"++", "--" -> impossible(token, "increment/decrement operator")
@@ -496,10 +703,22 @@ internal class KotlinSubsetParser(source: String) {
 		while (position < values.size) {
 			validateExpressionToken(values[position])
 			if (values[position].text in arrayFactories && values.getOrNull(position + 1)?.text == "<") impossible(values[position + 1], "generic collection or array factory type arguments")
+			if (values[position].kind == Kind.WORD && values.getOrNull(position + 1)?.text == "(") {
+				val close = matchingClose(values, position + 1)
+				splitTopLevel(values.subList(position + 2, close), ",").forEach { argument ->
+					argument.firstOrNull()?.takeIf { it.text == "*" }?.let { impossible(it, "spread call argument") }
+					argument.getOrNull(1)?.takeIf { argument.firstOrNull()?.kind == Kind.WORD && it.text == "=" }?.let {
+						impossible(it, "named call argument")
+					}
+				}
+			}
 			if (values[position].text == "-" && values.getOrNull(position + 1)?.let(::hasUnsignedSuffix) == true && isUnaryPosition(previous)) impossible(values[position], "unary minus on unsigned literal")
 			if (values[position].text in setOf("as", "is", "!is")) {
 				val operator = values[position]
-				if (operator.text == "as" && values.getOrNull(position + 1)?.text == "?") impossible(operator, "Kotlin safe cast")
+				if (operator.text == "as" && values.getOrNull(position + 1)?.text == "?") {
+					val question = values[position + 1]
+					impossible(operator.copy(text = "as?", endOffset = question.endOffset), "Kotlin safe cast")
+				}
 				val (type, nextPosition) = renderTypeTokens(values, position + 1)
 				append(' ').append(operator.text).append(' ').append(type)
 				previous = Token(Kind.WORD, type, values[nextPosition - 1].offset)
@@ -715,31 +934,22 @@ internal class KotlinSubsetParser(source: String) {
 		var position = 0
 		while (position < source.length) {
 			if (valid(source[position])) { position += 1; continue }
-			if (source[position] != '_' || position == 0 || !valid(source[position - 1])) fail(token.copy(offset = token.offset + token.text.indexOf(source) + position), "Invalid Kotlin numeric separator")
+			if (source[position] != '_' || position == 0 || !valid(source[position - 1])) fail(token.subspan(token.text.indexOf(source) + position), "Invalid Kotlin numeric separator")
 			while (position < source.length && source[position] == '_') position += 1
-			if (position == source.length || !valid(source[position])) fail(token.copy(offset = token.offset + token.text.indexOf(source) + position.coerceAtMost(source.lastIndex)), "Invalid Kotlin numeric separator")
+			if (position == source.length || !valid(source[position])) fail(token.subspan(token.text.indexOf(source) + position.coerceAtMost(source.lastIndex)), "Invalid Kotlin numeric separator")
 		}
 	}
 
 	private fun normalizeQuoted(token: Token): String {
-		if (token.kind == Kind.STRING && token.text.startsWith("\"\"\"")) {
-			val body = token.text.removePrefix("\"\"\"").removeSuffix("\"\"\"")
-			val interpolation = body.indexOf('$')
-			if (interpolation >= 0) fail(token.copy(offset = token.offset + 3 + interpolation), "Kotlin string interpolation has no faithful Crescent representation")
-			return "\"${escapeCrescent(body)}\""
-		}
+		if (token.kind == Kind.STRING) return normalizeStringTemplate(token)
 		val quote = token.text.first()
 		val body = token.text.substring(1, token.text.length - 1)
 		val output = StringBuilder()
 		var position = 0
 		while (position < body.length) {
 			val char = body[position++]
-			if (char != '\\') {
-				if (token.kind == Kind.STRING && char == '$') fail(token.copy(offset = token.offset + position), "Kotlin string interpolation has no faithful Crescent representation")
-				output.append(char)
-				continue
-			}
-			val escapeToken = token.copy(offset = token.offset + position)
+			if (char != '\\') { output.append(char); continue }
+			val escapeToken = token.subspan(position, (position + 1).coerceAtMost(token.text.length))
 			if (position == body.length) fail(escapeToken, "Unterminated Kotlin escape")
 			val escaped = body[position++]
 			when (escaped) {
@@ -756,6 +966,113 @@ internal class KotlinSubsetParser(source: String) {
 			}
 		}
 		return "$quote$output$quote"
+	}
+
+	private fun normalizeStringTemplate(token: Token): String {
+		val raw = token.text.startsWith("\"\"\"")
+		val contentStart = if (raw) 3 else 1
+		val contentEnd = token.text.length - contentStart
+		val output = StringBuilder("\"")
+		var position = contentStart
+		while (position < contentEnd) {
+			val char = token.text[position]
+			if (!raw && char == '\\') {
+				val escapeStart = position++
+				if (position >= contentEnd) fail(token.subspan(escapeStart, position), "Unterminated Kotlin escape")
+				val escaped = token.text[position++]
+				when (escaped) {
+					'n', 'r', 't', '0', '\\', '"', '\'', '$' -> output.append('\\').append(escaped)
+					'b' -> fail(token.subspan(escapeStart, position), "Kotlin backspace escape has no faithful Crescent representation")
+					'u' -> {
+						if (position + 4 > contentEnd) fail(token.subspan(escapeStart, position), "Incomplete Kotlin Unicode escape")
+						val codeEnd = position + 4
+						val code = token.text.substring(position, codeEnd).toIntOrNull(16)
+							?: fail(token.subspan(escapeStart, codeEnd), "Invalid Kotlin Unicode escape")
+						position = codeEnd
+						output.append(escapeCrescent(code.toChar().toString()))
+					}
+					else -> fail(token.subspan(escapeStart, position), "Unsupported Kotlin escape '\\$escaped'")
+				}
+				continue
+			}
+			if (char != '$') {
+				output.append(if (raw) escapeCrescent(char.toString()) else char)
+				position++
+				continue
+			}
+
+			val templateStart = position
+			val next = token.text.getOrNull(position + 1)
+			when {
+				next == '{' -> {
+					val close = findTemplateClose(token, position + 2, contentEnd)
+					val expressionStart = position + 2
+					val expression = token.text.substring(expressionStart, close)
+					if (expression.isBlank()) fail(token.subspan(templateStart, close + 1), "Kotlin string template requires an expression")
+					val rendered = renderTemplateExpression(expression, token.offset + expressionStart)
+					// The translated template lives inside a regular Crescent string token. Preserve
+					// quotes and escapes until Crescent reparses the interpolation body.
+					val embeddedSource = rendered.replace("\\", "\\\\").replace("\"", "\\\"")
+					output.append("\${").append(embeddedSource).append('}')
+					position = close + 1
+				}
+				next != null && (next == '_' || next.isLetter()) -> {
+					var end = position + 2
+					while (end < contentEnd && (token.text[end] == '_' || token.text[end].isLetterOrDigit())) end++
+					output.append(token.text, position, end)
+					position = end
+				}
+				else -> fail(token.subspan(templateStart), "Malformed Kotlin string template")
+			}
+		}
+		return output.append('"').toString()
+	}
+
+	private fun findTemplateClose(token: Token, start: Int, contentEnd: Int): Int {
+		var position = start
+		var depth = 1
+		var quote: Char? = null
+		var triple = false
+		var escaped = false
+		while (position < contentEnd) {
+			val char = token.text[position]
+			if (quote != null) {
+				if (triple && char == quote && token.text.startsWith("$quote$quote$quote", position)) {
+					position += 3; quote = null; triple = false; continue
+				}
+				if (!triple && !escaped && char == quote) { quote = null; position++; continue }
+				escaped = !triple && char == '\\' && !escaped
+				if (char != '\\') escaped = false
+				position++
+				continue
+			}
+			if (char == '\'' || char == '"') {
+				quote = char
+				triple = char == '"' && token.text.startsWith("\"\"\"", position)
+				position += if (triple) 3 else 1
+				continue
+			}
+			when (char) {
+				'{' -> depth++
+				'}' -> if (--depth == 0) return position
+			}
+			position++
+		}
+		fail(token.subspan((start - 2).coerceAtLeast(0), contentEnd), "Unterminated Kotlin string template")
+	}
+
+	private fun renderTemplateExpression(expression: String, absoluteStart: Int): String {
+		val embedded = try {
+			lex(expression).dropLast(1).map { token ->
+				token.copy(offset = token.offset + absoluteStart, endOffset = token.endOffset + absoluteStart)
+			}
+		} catch (failure: RawKotlinTranslationFailure) {
+			throw RawKotlinTranslationFailure(failure.detail, failure.startOffset + absoluteStart, failure.endOffset + absoluteStart)
+		}
+		embedded.firstOrNull { it.kind == Kind.COMMENT || it.kind == Kind.NEWLINE }?.let {
+			impossible(it, "comment or newline in Kotlin string template")
+		}
+		return renderTokens(embedded)
 	}
 
 	private fun escapeCrescent(value: String): String = buildString {
@@ -810,7 +1127,7 @@ internal class KotlinSubsetParser(source: String) {
 	private fun match(text: String): Boolean = if (peek().text == text) { index++; true } else false
 	private fun expect(text: String): Token = if (match(text)) previous() else fail(peek(), "Expected '$text', got '${peek().text}'")
 	private fun expectWord(context: String): Token = if (peek().kind == Kind.WORD) next() else fail(peek(), "Expected $context, got '${peek().text}'")
-	private fun fail(token: Token, message: String): Nothing = throw IllegalArgumentException("$message at offset ${token.offset}")
+	private fun fail(token: Token, message: String): Nothing = throw RawKotlinTranslationFailure(message, token.offset, token.endOffset)
 	private fun impossible(token: Token, construct: String): Nothing = fail(token, "$construct has no faithful Crescent representation")
 
 	companion object {
@@ -829,28 +1146,17 @@ internal class KotlinSubsetParser(source: String) {
 			while (i < source.length) {
 				val start = i; val ch = source[i]
 				when {
-					ch == '\r' -> { i++; if (i < source.length && source[i] == '\n') i++; result += Token(Kind.NEWLINE, "\n", start) }
-					ch == '\n' -> { i++; result += Token(Kind.NEWLINE, "\n", start) }
+					ch == '\r' -> { i++; if (i < source.length && source[i] == '\n') i++; result += Token(Kind.NEWLINE, "\n", start, i) }
+					ch == '\n' -> { i++; result += Token(Kind.NEWLINE, "\n", start, i) }
 					ch.isWhitespace() -> i++
 					source.startsWith("//", i) -> { i += 2; while (i < source.length && source[i] !in "\r\n") i++; result += Token(Kind.COMMENT, source.substring(start, i), start) }
-					source.startsWith("/*", i) -> { i += 2; var depth = 1; while (i < source.length && depth > 0) { when { source.startsWith("/*", i) -> { depth++; i += 2 }; source.startsWith("*/", i) -> { depth--; i += 2 }; else -> i++ } }; if (depth != 0) throw IllegalArgumentException("Unterminated block comment at offset $start"); result += Token(Kind.COMMENT, source.substring(start, i), start) }
+					source.startsWith("/*", i) -> { i += 2; var depth = 1; while (i < source.length && depth > 0) { when { source.startsWith("/*", i) -> { depth++; i += 2 }; source.startsWith("*/", i) -> { depth--; i += 2 }; else -> i++ } }; if (depth != 0) throw RawKotlinTranslationFailure("Unterminated block comment", start, source.length); result += Token(Kind.COMMENT, source.substring(start, i), start) }
 					ch == '"' || ch == '\'' -> {
 						val quote = ch
-						val triple = quote == '"' && source.startsWith("\"\"\"", i)
-						if (triple) i += 3 else i++
-						var escaped = false
-						var terminated = false
-						while (i < source.length) {
-							if (triple && source.startsWith("\"\"\"", i)) { i += 3; terminated = true; break }
-							val current = source[i++]
-							if (!triple && current == quote && !escaped) { terminated = true; break }
-							escaped = current == '\\' && !escaped
-							if (current != '\\') escaped = false
-						}
-						if (!terminated) throw IllegalArgumentException("Unterminated quoted literal at offset $start")
+						i = scanQuotedEnd(source, start)
 						result += Token(if (quote == '\'') Kind.CHAR else Kind.STRING, source.substring(start, i), start)
 					}
-					ch == '`' -> throw IllegalArgumentException("Kotlin escaped identifiers have no faithful Crescent representation at offset $start")
+					ch == '`' -> throw RawKotlinTranslationFailure("Kotlin escaped identifiers have no faithful Crescent representation", start, start + 1)
 					ch.isLetter() || ch == '_' -> { i++; while (i < source.length && (source[i].isLetterOrDigit() || source[i] == '_')) i++; result += Token(Kind.WORD, source.substring(start, i), start) }
 					ch.isDigit() -> {
 						i++
@@ -878,7 +1184,56 @@ internal class KotlinSubsetParser(source: String) {
 					else -> { val symbol = multiSymbols.firstOrNull { source.startsWith(it, i) } ?: ch.toString(); i += symbol.length; result += Token(Kind.SYMBOL, symbol, start) }
 				}
 			}
-			result += Token(Kind.EOF, "<eof>", source.length); return result
+			result += Token(Kind.EOF, "<eof>", source.length, source.length); return result
+		}
+
+		private fun scanQuotedEnd(source: String, start: Int): Int {
+			val quote = source[start]
+			val triple = quote == '"' && source.startsWith("\"\"\"", start)
+			var position = start + if (triple) 3 else 1
+			var templateDepth = 0
+			while (position < source.length) {
+				if (templateDepth == 0) {
+					if (triple && source.startsWith("\"\"\"", position)) return position + 3
+					val char = source[position]
+					if (!triple && char == '\\') { position = (position + 2).coerceAtMost(source.length); continue }
+					if (!triple && char == quote) return position + 1
+					if (quote == '"' && char == '$' && source.getOrNull(position + 1) == '{') {
+						templateDepth = 1; position += 2; continue
+					}
+					position++
+					continue
+				}
+
+				when {
+					source.startsWith("//", position) -> {
+						position += 2
+						while (position < source.length && source[position] !in "\r\n") position++
+					}
+					source.startsWith("/*", position) -> {
+						position += 2
+						var commentDepth = 1
+						while (position < source.length && commentDepth > 0) {
+							when {
+								source.startsWith("/*", position) -> { commentDepth++; position += 2 }
+								source.startsWith("*/", position) -> { commentDepth--; position += 2 }
+								else -> position++
+							}
+						}
+					}
+					source[position] == '"' || source[position] == '\'' -> position = scanQuotedEnd(source, position)
+					source[position] == '{' -> { templateDepth++; position++ }
+					source[position] == '}' -> { templateDepth--; position++ }
+					else -> position++
+				}
+			}
+			throw RawKotlinTranslationFailure("Unterminated quoted literal", start, source.length)
 		}
 	}
 }
+
+internal class RawKotlinTranslationFailure(
+	val detail: String,
+	val startOffset: Int,
+	val endOffset: Int,
+) : IllegalArgumentException("$detail at offset $startOffset")

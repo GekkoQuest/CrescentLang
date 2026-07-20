@@ -1,5 +1,9 @@
 package dev.twelveoclock.lang.crescent.parsers
 
+import dev.twelveoclock.lang.crescent.diagnostics.Diagnostic
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticException
+import dev.twelveoclock.lang.crescent.diagnostics.DiagnosticSeverity
+import dev.twelveoclock.lang.crescent.diagnostics.SourceLocations
 import dev.twelveoclock.lang.crescent.iterator.PeekingCharIterator
 import dev.twelveoclock.lang.crescent.iterator.PeekingTokenIterator
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST
@@ -30,7 +34,7 @@ object CrescentParser {
 		val declaredGlobals = mutableSetOf<String>()
 
 		var mainFunction: CrescentAST.Node.Function? = null
-		val tokenIterator = PeekingTokenIterator.excludingComments(tokens)
+		val tokenIterator = PeekingTokenIterator.excludingComments(tokens, filePath)
 
 		var visibility = CrescentToken.Visibility.PUBLIC
 		var hasExplicitVisibility = false
@@ -40,6 +44,7 @@ object CrescentParser {
 		while (tokenIterator.hasNext()) {
 
 			val token = tokenIterator.next()
+			val declarationStart = tokenIterator.position - 1
 
 			// Should read top level tokens
 			when (token) {
@@ -127,7 +132,12 @@ object CrescentParser {
 					}
 
 					registerType(name, "trait", declaredTypes, tokenIterator)
-					traits.putUnique(name, CrescentAST.Node.Trait(name, functionTraits, visibility), "trait", tokenIterator)
+					traits.putUnique(
+						name,
+						tokenIterator.locate(declarationStart, CrescentAST.Node.Trait(name, functionTraits, visibility)),
+						"trait",
+						tokenIterator,
+					)
 				}
 
 				CrescentToken.Type.OBJECT -> {
@@ -154,14 +164,20 @@ object CrescentParser {
 
 						val entryName = (innerToken as? CrescentToken.Key)?.string
 							?: tokenIterator.fail("Expected enum entry name, got $innerToken")
+						val entryStart = tokenIterator.position - 1
 						val entryArgs = readArguments(tokenIterator)
 						if (!entryNames.add(entryName)) tokenIterator.fail("Duplicate enum entry '$entryName' in enum '$name'")
 
-						entries += CrescentAST.Node.EnumEntry(entryName, entryArgs)
+						entries += tokenIterator.locate(entryStart, CrescentAST.Node.EnumEntry(entryName, entryArgs))
 					}
 
 					registerType(name, "enum", declaredTypes, tokenIterator)
-					enums.putUnique(name, CrescentAST.Node.Enum(name, parameters, entries, visibility), "enum", tokenIterator)
+					enums.putUnique(
+						name,
+						tokenIterator.locate(declarationStart, CrescentAST.Node.Enum(name, parameters, entries, visibility)),
+						"enum",
+						tokenIterator,
+					)
 				}
 
 				CrescentToken.Type.SEALED -> {
@@ -205,7 +221,10 @@ object CrescentParser {
 					registerType(name, "sealed type", declaredTypes, tokenIterator)
 					sealeds.putUnique(
 						name,
-						CrescentAST.Node.Sealed(name, innerStructs, innerObjects, visibility),
+						tokenIterator.locate(
+							declarationStart,
+							CrescentAST.Node.Sealed(name, innerStructs, innerObjects, visibility),
+						),
 						"sealed type",
 						tokenIterator,
 					)
@@ -248,11 +267,11 @@ object CrescentParser {
 							null
 						}
 
-						imports += CrescentAST.Node.Import(
+						imports += tokenIterator.locate(declarationStart, CrescentAST.Node.Import(
 							path = "",
 							typeName,
 							typeAlias
-						)
+						))
 
 						continue
 					}
@@ -288,7 +307,7 @@ object CrescentParser {
 						null
 					}
 
-					imports += CrescentAST.Node.Import(path, typeName, typeAlias)
+					imports += tokenIterator.locate(declarationStart, CrescentAST.Node.Import(path, typeName, typeAlias))
 				}
 
 				else -> tokenIterator.fail("Unexpected top-level token $token")
@@ -302,7 +321,7 @@ object CrescentParser {
 		}
 		if (hasPendingPrefix) tokenIterator.fail("Visibility/modifier is not followed by a declaration")
 
-		return CrescentAST.Node.File(
+		return SourceLocations.attach(CrescentAST.Node.File(
 			path = filePath,
 			imports,
 			structs,
@@ -316,7 +335,7 @@ object CrescentParser {
 			constants,
 			functions,
 			mainFunction,
-		)
+		), tokenIterator.sourceText?.span(0, tokenIterator.sourceText!!.text.length))
 	}
 
 
@@ -324,10 +343,10 @@ object CrescentParser {
 		tokenIterator: PeekingTokenIterator,
 		visibility: CrescentToken.Visibility = CrescentToken.Visibility.PUBLIC,
 	): CrescentAST.Node.Object {
-
+		val sourceStart = tokenIterator.position
 		val name = tokenIterator.nextKey("object name")
 		if (tokenIterator.peekNext() != CrescentToken.Bracket.OPEN) {
-			return CrescentAST.Node.Object(name, emptyMap(), emptyMap(), emptyMap(), visibility)
+			return tokenIterator.locate(sourceStart, CrescentAST.Node.Object(name, emptyMap(), emptyMap(), emptyMap(), visibility))
 		}
 
 		val objectVariables = mutableMapOf<String, CrescentAST.Node.Variable.Basic>()
@@ -397,14 +416,14 @@ object CrescentParser {
 		}
 		if (hasPendingPrefix) tokenIterator.fail("Visibility/modifier is not followed by an object member in '$name'")
 
-		return CrescentAST.Node.Object(name, objectVariables, objectConstants, objectFunctions, visibility)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Object(name, objectVariables, objectConstants, objectFunctions, visibility))
 	}
 
 	private fun readStruct(
 		tokenIterator: PeekingTokenIterator,
 		visibility: CrescentToken.Visibility = CrescentToken.Visibility.PUBLIC,
 	): CrescentAST.Node.Struct {
-
+		val sourceStart = tokenIterator.position
 		val name = tokenIterator.nextKey("struct name")
 		val variables = mutableListOf<CrescentAST.Node.Variable.Basic>()
 		val variableNames = mutableSetOf<String>()
@@ -461,11 +480,11 @@ object CrescentParser {
 		if (hasPendingVisibility) tokenIterator.fail("Visibility modifier is not followed by a field in struct '$name'")
 		if (!foundClosingParenthesis) tokenIterator.fail("Unterminated struct '$name'; expected closing parenthesis")
 
-		return CrescentAST.Node.Struct(name, variables, visibility)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Struct(name, variables, visibility))
 	}
 
 	private fun readImpl(tokenIterator: PeekingTokenIterator): CrescentAST.Node.Impl {
-
+		val sourceStart = tokenIterator.position
 		var type: CrescentAST.Node.Type? = null
 
 		val functions = mutableListOf<CrescentAST.Node.Function>()
@@ -538,12 +557,12 @@ object CrescentParser {
 		}
 		if (hasPendingPrefix) tokenIterator.fail("Visibility/modifier is not followed by a declaration in impl")
 
-		return CrescentAST.Node.Impl(
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Impl(
 			type ?: tokenIterator.fail("An impl declaration requires a target type"),
 			implModifiers.toList(),
 			extendedTypes,
 			functions,
-		)
+		))
 	}
 
 
@@ -552,7 +571,7 @@ object CrescentParser {
 		visibility: CrescentToken.Visibility,
 		modifiers: List<CrescentToken.Modifier>
 	): CrescentAST.Node.Function {
-
+		val sourceStart = tokenIterator.position
 		val name = tokenIterator.nextKey("function name")
 		val parameters = readParameters(tokenIterator)
 
@@ -566,18 +585,18 @@ object CrescentParser {
 
 		val expressions = readBlock(tokenIterator)
 
-		return CrescentAST.Node.Function(
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Function(
 			name,
 			modifiers.toList(),
 			visibility,
 			parameters,
 			type,
 			expressions,
-		)
+		))
 	}
 
 	private fun readBlock(tokenIterator: PeekingTokenIterator): CrescentAST.Node.Statement.Block {
-
+		val sourceStart = tokenIterator.position
 		val expressionNodes = mutableListOf<CrescentAST.Node>()
 
 		tokenIterator.expect(CrescentToken.Bracket.OPEN, "block opening brace")
@@ -620,11 +639,11 @@ object CrescentParser {
 
 		tokenIterator.expect(CrescentToken.Bracket.CLOSE, "block closing brace")
 
-		return CrescentAST.Node.Statement.Block(expressionNodes)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Statement.Block(expressionNodes))
 	}
 
 	private fun readFunctionTrait(tokenIterator: PeekingTokenIterator): CrescentAST.Node.FunctionTrait {
-
+		val sourceStart = tokenIterator.position
 		val name = tokenIterator.nextKey("function trait name")
 		val parameters = readParameters(tokenIterator)
 
@@ -636,14 +655,14 @@ object CrescentParser {
 				CrescentAST.Node.Type.unit
 			}
 
-		return CrescentAST.Node.FunctionTrait(name, parameters, type)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.FunctionTrait(name, parameters, type))
 	}
 
 	private fun readConstant(
 		tokenIterator: PeekingTokenIterator,
 		visibility: CrescentToken.Visibility,
 	): CrescentAST.Node.Variable.Constant {
-
+		val sourceStart = tokenIterator.position
 		val name = tokenIterator.nextKey("constant name")
 
 		val type =
@@ -661,7 +680,7 @@ object CrescentParser {
 		val expression = readExpression(tokenIterator)
 
 
-		return CrescentAST.Node.Variable.Constant(name, type, expression, visibility)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Variable.Constant(name, type, expression, visibility))
 	}
 
 	fun readVariable(
@@ -669,7 +688,7 @@ object CrescentParser {
 		visibility: CrescentToken.Visibility,
 		isFinal: Boolean,
 	): CrescentAST.Node.Variable.Basic {
-
+		val sourceStart = tokenIterator.position
 		val name = tokenIterator.nextKey("variable name")
 
 		val type =
@@ -686,7 +705,7 @@ object CrescentParser {
 		tokenIterator.expect(CrescentToken.Operator.ASSIGN, "variable assignment")
 		val expression = readExpression(tokenIterator)
 
-		return CrescentAST.Node.Variable.Basic(name, type, expression, isFinal, visibility)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Variable.Basic(name, type, expression, isFinal, visibility))
 	}
 
 	fun readVariables(
@@ -703,23 +722,24 @@ object CrescentParser {
 		requireInitializer: Boolean,
 	): List<CrescentAST.Node.Variable.Basic> {
 
+		val declarationStart = (tokenIterator.position - 1).coerceAtLeast(0)
 		if (tokenIterator.peekNext() !is CrescentToken.Key) tokenIterator.fail("Variable declaration requires a name")
-		val names = mutableListOf(tokenIterator.nextKey("variable name"))
+		val names = mutableListOf(tokenIterator.nextKey("variable name") to (tokenIterator.position - 1))
 		while (true) {
 			when (tokenIterator.peekNext()) {
-				is CrescentToken.Key -> names += tokenIterator.nextKey("variable name")
+				is CrescentToken.Key -> names += (tokenIterator.nextKey("variable name") to (tokenIterator.position - 1))
 				CrescentToken.Operator.COMMA -> {
 					tokenIterator.next()
 					if (tokenIterator.peekNext() !is CrescentToken.Key) {
 						tokenIterator.fail("Expected variable name after ','")
 					}
-					names += tokenIterator.nextKey("variable name")
+					names += (tokenIterator.nextKey("variable name") to (tokenIterator.position - 1))
 				}
 				else -> break
 			}
 		}
 		val uniqueNames = mutableSetOf<String>()
-		names.forEach { name ->
+		names.forEach { (name, _) ->
 			if (!uniqueNames.add(name)) tokenIterator.fail("Duplicate variable name '$name' in declaration")
 		}
 
@@ -739,13 +759,13 @@ object CrescentParser {
 			CrescentAST.Node.Expression(emptyList())
 		}
 
-		return names.map { name ->
-			CrescentAST.Node.Variable.Basic(name, type, expression, isFinal, visibility)
+		return names.map { (name, _) ->
+			tokenIterator.locate(declarationStart, CrescentAST.Node.Variable.Basic(name, type, expression, isFinal, visibility))
 		}
 	}
 
 	fun readWhile(tokenIterator: PeekingTokenIterator): CrescentAST.Node.Statement.While {
-
+		val sourceStart = tokenIterator.position
 		tokenIterator.expect(CrescentToken.Statement.WHILE, "while keyword")
 		tokenIterator.expect(CrescentToken.Parenthesis.OPEN, "while predicate opening parenthesis")
 
@@ -753,11 +773,11 @@ object CrescentParser {
 		tokenIterator.expect(CrescentToken.Parenthesis.CLOSE, "while predicate closing parenthesis")
 		val block = readBlock(tokenIterator)
 
-		return CrescentAST.Node.Statement.While(predicate, block)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Statement.While(predicate, block))
 	}
 
 	fun readFor(tokenIterator: PeekingTokenIterator): CrescentAST.Node.Statement.For {
-
+		val sourceStart = tokenIterator.position
 		tokenIterator.expect(CrescentToken.Statement.FOR, "for keyword")
 
 		val identifiers = mutableListOf<CrescentAST.Node.Identifier>()
@@ -784,13 +804,14 @@ object CrescentParser {
 		val ranges = mutableListOf<CrescentAST.Node.Statement.Range>()
 
 		while (tokenIterator.hasNext()) {
+			val rangeStart = tokenIterator.position
 			val start = readExpressionUntil(tokenIterator, setOf(CrescentToken.Operator.RANGE_TO))
 			tokenIterator.expect(CrescentToken.Operator.RANGE_TO, "for-loop range separator")
 			val end = readExpressionUntil(
 				tokenIterator,
 				setOf(CrescentToken.Operator.COMMA, CrescentToken.Bracket.OPEN),
 			)
-			ranges += CrescentAST.Node.Statement.Range(start, end)
+			ranges += tokenIterator.locate(rangeStart, CrescentAST.Node.Statement.Range(start, end))
 
 			if (tokenIterator.peekNext() != CrescentToken.Operator.COMMA) {
 				break
@@ -801,7 +822,7 @@ object CrescentParser {
 
 		val block = readBlock(tokenIterator)
 
-		return CrescentAST.Node.Statement.For(identifiers, ranges, block)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Statement.For(identifiers, ranges, block))
 	}
 
 	fun readParameters(tokenIterator: PeekingTokenIterator): List<CrescentAST.Node.Parameter> {
@@ -817,11 +838,13 @@ object CrescentParser {
 		var foundDefault = false
 		while (tokenIterator.hasNext() && tokenIterator.peekNext() != CrescentToken.Parenthesis.CLOSE) {
 
-			val names = tokenIterator.nextUntil { it !is CrescentToken.Key }.map {
-				(it as? CrescentToken.Key)?.string ?: tokenIterator.fail("Expected parameter name, got $it")
+			val namesStart = tokenIterator.position
+			val names = tokenIterator.nextUntil { it !is CrescentToken.Key }.mapIndexed { index, token ->
+				((token as? CrescentToken.Key)?.string ?: tokenIterator.fail("Expected parameter name, got $token")) to
+					(namesStart + index)
 			}
 			if (names.isEmpty()) tokenIterator.fail("Expected parameter name")
-			names.forEach { name ->
+			names.forEach { (name, _) ->
 				if (!parameterNames.add(name)) tokenIterator.fail("Duplicate parameter '$name'")
 			}
 
@@ -839,12 +862,12 @@ object CrescentParser {
 				null
 			}
 
-			names.forEach { name ->
-				parameters += if (defaultValue == null) {
+			names.forEach { (name, sourceStart) ->
+				parameters += tokenIterator.locate(sourceStart, if (defaultValue == null) {
 					CrescentAST.Node.Parameter.Basic(name, type)
 				} else {
 					CrescentAST.Node.Parameter.WithDefault(name, type, defaultValue)
-				}
+				})
 			}
 
 			if (tokenIterator.peekNext() != CrescentToken.Parenthesis.CLOSE) {
@@ -904,7 +927,7 @@ object CrescentParser {
 	}
 
 	fun readWhen(tokenIterator: PeekingTokenIterator): CrescentAST.Node.Statement.When {
-
+		val sourceStart = tokenIterator.position
 		val clauses = mutableListOf<CrescentAST.Node.Statement.When.Clause>()
 		var hasElseClause = false
 
@@ -980,11 +1003,11 @@ object CrescentParser {
 			clauses += CrescentAST.Node.Statement.When.Clause(ifExpressionNode, thenExpressions)
 		}
 
-		return CrescentAST.Node.Statement.When(argument, clauses, subjectName)
+		return tokenIterator.locate(sourceStart, CrescentAST.Node.Statement.When(argument, clauses, subjectName))
 	}
 
 	fun readType(tokenIterator: PeekingTokenIterator): CrescentAST.Node.Type {
-
+		val sourceStart = tokenIterator.position
 		var type: CrescentAST.Node.Type
 
 		when (val peekNext = tokenIterator.peekNext()) {
@@ -1012,11 +1035,16 @@ object CrescentParser {
 			type = CrescentAST.Node.Type.Result(type)
 		}
 
-		return type
+		return tokenIterator.locate(sourceStart, type)
 	}
 
 	// Returns null if the node should be skipped in the expression
 	fun readExpressionNode(tokenIterator: PeekingTokenIterator, isInDotChain: Boolean = false): CrescentAST.Node? {
+		val sourceStart = tokenIterator.position
+		return readExpressionNodeImpl(tokenIterator, isInDotChain)?.let { tokenIterator.locate(sourceStart, it) }
+	}
+
+	private fun readExpressionNodeImpl(tokenIterator: PeekingTokenIterator, isInDotChain: Boolean): CrescentAST.Node? {
 
 		return when (val next = tokenIterator.next()) {
 
@@ -1095,6 +1123,7 @@ object CrescentParser {
 
 					is CrescentToken.Data.String -> {
 						val escapedDollarOffsets = tokenIterator.escapedDollarOffsetsForLastToken()
+						val stringSourceOffsets = tokenIterator.stringContentSourceOffsetsForLastToken()
 
 						// If no string interpolation, keep it simple
 						if ('$' !in next.kotlinString) {
@@ -1131,14 +1160,41 @@ object CrescentParser {
 
 							if (iterator.peekNextOrNull() == '{') {
 								iterator.next()
-								val interpolationBody = iterator.readInterpolationBody()
-								val interpolationTokens = PeekingTokenIterator(CrescentLexer.invoke(interpolationBody))
+								val interpolationBodyStart = iterator.position
+								val interpolationBody = try {
+									iterator.readInterpolationBody()
+								} catch (_: UnterminatedInterpolation) {
+									val source = tokenIterator.sourceText
+									val span = if (source != null && stringSourceOffsets != null) {
+										source.span(stringSourceOffsets[charOffset], stringSourceOffsets[iterator.position])
+									} else tokenIterator.lastSpan
+									val absoluteOffset = span?.start?.offset ?: charOffset
+									throw DiagnosticException(Diagnostic(
+										DiagnosticSeverity.ERROR,
+										"Unterminated string interpolation starting at offset $absoluteOffset",
+										span,
+									))
+								}
+								val interpolationBodyEnd = iterator.position - 1
+								val interpolationLexed = if (tokenIterator.sourceText != null && stringSourceOffsets != null) {
+									CrescentLexer.invoke(
+										tokenIterator.sourceText!!,
+										interpolationBody,
+										stringSourceOffsets.copyOfRange(interpolationBodyStart, interpolationBodyEnd + 1),
+									)
+								} else CrescentLexer.invoke(interpolationBody)
+								val interpolationTokens = PeekingTokenIterator(interpolationLexed)
 								nodes += readExpression(interpolationTokens)
 								if (interpolationTokens.hasNext()) {
 									tokenIterator.fail("String interpolation must contain exactly one complete expression")
 								}
 							} else {
-								nodes += CrescentAST.Node.Identifier(iterator.nextUntil { it == ' ' || it == '$' || it != '_' && !it.isLetterOrDigit() })
+								val identifierStart = iterator.position
+								val identifier = CrescentAST.Node.Identifier(iterator.nextUntil { it == ' ' || it == '$' || it != '_' && !it.isLetterOrDigit() })
+								val source = tokenIterator.sourceText
+								nodes += if (source != null && stringSourceOffsets != null) {
+									SourceLocations.attach(identifier, source.span(stringSourceOffsets[identifierStart], stringSourceOffsets[iterator.position]))
+								} else identifier
 							}
 
 							if (iterator.hasNext()) {
@@ -1216,7 +1272,7 @@ object CrescentParser {
 			tokenIterator.next()
 			nodes += readExpressionNode(tokenIterator, true) ?: tokenIterator.fail("Expected member after '.'")
 		}
-		return CrescentAST.Node.DotChain(nodes)
+		return tokenIterator.locate((tokenIterator.position - nodes.size).coerceAtLeast(0), CrescentAST.Node.DotChain(nodes))
 	}
 
 	fun readExpression(tokenIterator: PeekingTokenIterator): CrescentAST.Node =
@@ -1227,7 +1283,7 @@ object CrescentParser {
 		terminators: Set<CrescentToken>,
 		stopAtStatementBoundary: Boolean = true,
 	): CrescentAST.Node {
-
+		val sourceStart = tokenIterator.position
 		val nodes = mutableListOf<CrescentAST.Node>()
 
 		if (tokenIterator.peekNext() == CrescentToken.Bracket.OPEN) {
@@ -1287,7 +1343,7 @@ object CrescentParser {
 		}
 		if (nodes.isEmpty()) tokenIterator.fail("Expected expression")
 
-		return collapseExpressionNodes(nodes, tokenIterator)
+		return tokenIterator.locate(sourceStart, collapseExpressionNodes(nodes, tokenIterator))
 	}
 
 	private fun collapseExpressionNodes(
@@ -1382,11 +1438,15 @@ object CrescentParser {
 		return actual
 	}
 
-	private fun PeekingTokenIterator.fail(message: String): Nothing =
-		throw IllegalArgumentException("Parse error at token index $position: $message")
+	private fun <T : CrescentAST.Node> PeekingTokenIterator.locate(startTokenIndex: Int, node: T): T =
+		SourceLocations.attach(node, spanFrom(startTokenIndex, position))
+
+	private fun PeekingTokenIterator.fail(message: String): Nothing {
+		val detail = "Parse error at token index $position: $message"
+		throw DiagnosticException(Diagnostic(DiagnosticSeverity.ERROR, detail, diagnosticSpan()))
+	}
 
 	private fun PeekingCharIterator.readInterpolationBody(): String {
-		val start = position - 1
 		var depth = 1
 		var quote: Char? = null
 		var escaped = false
@@ -1419,9 +1479,11 @@ object CrescentParser {
 					else -> append(char)
 				}
 			}
-			throw IllegalArgumentException("Unterminated string interpolation starting at offset $start")
+			throw UnterminatedInterpolation()
 		}
 	}
+
+	private class UnterminatedInterpolation : RuntimeException()
 
 	fun readNextUntilClosed(
 		tokenIterator: PeekingTokenIterator,

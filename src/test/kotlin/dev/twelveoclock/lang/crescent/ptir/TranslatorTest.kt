@@ -139,8 +139,6 @@ class TranslatorTest {
 			boundary("fun apply() { run { work() } }", "trailing lambda", " { work", 1),
 			boundary("fun stop() { break@loop }", "labeled control", "@"),
 			boundary("fun stop() { loop@ while (ready) {} }", "labeled control", "@"),
-			boundary("fun same(left: Any, right: Any): Boolean { return left === right }", "referential equality", "==="),
-			boundary("fun different(left: Any, right: Any): Boolean { return left !== right }", "referential equality", "!=="),
 		)
 		cases.forEach { (source, diagnostic, offset) ->
 			val error = assertFailsWith<IllegalArgumentException> { KotlinToCrescentTranslator.translate(source) }
@@ -262,7 +260,6 @@ class TranslatorTest {
 		assertContains(escape.message.orEmpty(), "backspace")
 		assertContains(escape.message.orEmpty(), "offset ${escapeSource.indexOf("\\b")}")
 		listOf(
-			Triple("fun text(): String { return \"value: ${'$'}value\" }", "interpolation", "${'$'}value"),
 			Triple("fun tooLarge(): Float { return 1e999f }", "overflows", "1e999f"),
 			Triple("fun invalid(): UInt { return 12_U }", "separator", "_"),
 		).forEach { (unsupported, diagnostic, offendingText) ->

@@ -3,11 +3,33 @@ package dev.twelveoclock.lang.crescent.project
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class CrescentStandardLibraryTest {
+
+	@Test
+	fun `bundled manifest exposes the documented concrete package surface`() {
+		val functionsByPackage = CrescentStandardLibrary.load().associate { file ->
+			file.packageId to file.functions.keys.toSet()
+		}
+
+		assertEquals(
+			mapOf(
+				"crescent.std.collections" to setOf(
+					"singletonI32", "pairI32", "sameI32", "swapPairI32", "sumPairI32",
+				),
+				"crescent.std.core" to setOf("identity", "choose"),
+				"crescent.std.math" to setOf(
+					"minI32", "maxI32", "clamp", "absoluteI32", "signI32", "isEvenI32", "isOddI32",
+				),
+				"crescent.std.text" to setOf("concatText", "isEmptyText", "repeatText", "surroundText"),
+			),
+			functionsByPackage,
+		)
+	}
 
 	@Test
 	fun `allows package composition across resources and rejects duplicate resources and symbols`() {

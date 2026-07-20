@@ -1,5 +1,6 @@
 package dev.twelveoclock.lang.crescent.vm
 
+import dev.twelveoclock.lang.crescent.diagnostics.SourceLocations
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node
 import dev.twelveoclock.lang.crescent.language.ast.CrescentAST.Node.Primitive
@@ -194,7 +195,13 @@ class CrescentVM @JvmOverloads constructor(
 		return Type.unit
 	}
 
-	fun runNode(node: Node, context: BlockContext): Node {
+	fun runNode(node: Node, context: BlockContext): Node = try {
+		runNodeImpl(node, context)
+	} catch (exception: CrescentRuntimeException) {
+		throw exception.withSourceSpan(SourceLocations.spanOf(node) ?: SourceLocations.spanOf(context.holder) ?: SourceLocations.spanOf(context.file))
+	}
+
+	private fun runNodeImpl(node: Node, context: BlockContext): Node {
 		when (node) {
 
 			is Primitive.String,

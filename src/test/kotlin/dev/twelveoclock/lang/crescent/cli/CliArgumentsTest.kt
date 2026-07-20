@@ -27,6 +27,12 @@ class CliArgumentsTest {
 		)
 		assertEquals(CrescentCommand.IR, request.command)
 		assertEquals(listOf("one", "--flag", "--"), request.programArgs)
+
+		val ptir = assertIs<CliRequest.Execute>(
+			CliArguments.parse(listOf("ptir-run", "project", "--", "one", "two")),
+		)
+		assertEquals(CrescentCommand.PTIR_RUN, ptir.command)
+		assertEquals(listOf("one", "two"), ptir.programArgs)
 	}
 
 	@Test
@@ -38,7 +44,7 @@ class CliArgumentsTest {
 	}
 
 	@Test
-	fun `translation commands reject argument separators`() {
+	fun `non-execution commands reject argument separators`() {
 		assertFailsWith<CliException> {
 			CliArguments.parse(listOf("ptir", "hello.moo", "--", "unused"))
 		}
